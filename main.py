@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 import time
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SOURCE_ROOT = PROJECT_ROOT / "src" / "swarm_simulate"
+sys.path.insert(0, str(SOURCE_ROOT))
 
 import irsim
 
@@ -40,10 +45,9 @@ from world_builder import build_runtime_world
 from sim_hud import SimulationHUD
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-BASE_WORLD_FILE = PROJECT_ROOT / "robot_world.yaml"
+BASE_WORLD_FILE = PROJECT_ROOT / "config" / "robot_world.yaml"
 RUNTIME_WORLD_FILE = (
-    PROJECT_ROOT / "robot_world_runtime.yaml"
+    PROJECT_ROOT / "config" / "robot_world_runtime.yaml"
 )
 
 
@@ -151,7 +155,7 @@ def main() -> int:
     )
 
     runtime_world_file = (
-        PROJECT_ROOT / f"robot_world_runtime_{batch_run_id}.yaml"
+        PROJECT_ROOT / "config" / f"robot_world_runtime_{batch_run_id}.yaml"
         if batch_run_id
         else RUNTIME_WORLD_FILE
     )

@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Any, Iterable
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SEEDS = [1, 2, 3, 4, 5, 10, 25, 42, 100, 12345]
 
 @dataclass(frozen=True)
