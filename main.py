@@ -425,12 +425,15 @@ def main() -> int:
             hud=hud,
         )
 
-        logger.snapshot_sources([
-            PROJECT_ROOT / name
-            for name in [
-                "main.py",
-                "robot_world.yaml",
-                runtime_world_file.name,
+        logger.snapshot_sources(
+            [
+                PROJECT_ROOT / "main.py",
+                BASE_WORLD_FILE,
+                runtime_world_file,
+            ]
+            + [
+                SOURCE_ROOT / name
+                for name in [
                 "world_builder.py",
                 "sim_hud.py",
                 "autonomous_foraging_controller.py",
@@ -451,7 +454,8 @@ def main() -> int:
                 "sensor_types.py",
                 "result_logger.py",
             ]
-        ])
+            ]
+        )
 
         backend.render()
         logger.log_event(
