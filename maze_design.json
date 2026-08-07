@@ -1,0 +1,77 @@
+{
+  "name": "compact_complex_perfect_maze_v2",
+  "generation_seed": 10777,
+  "world_size_m": [
+    13.75,
+    13.75
+  ],
+  "corridor_width_m": 1.25,
+  "robot_diameter_m": 0.5,
+  "logical_nodes": 25,
+  "logical_edges": 24,
+  "junctions": 6,
+  "dead_ends": 7,
+  "energy_endpoints": [
+    {
+      "id": "E1",
+      "logical_node": [
+        0,
+        1
+      ],
+      "distance_edges": 15,
+      "x_m": 1.875,
+      "y_m": 4.375
+    },
+    {
+      "id": "E2",
+      "logical_node": [
+        1,
+        2
+      ],
+      "distance_edges": 15,
+      "x_m": 4.375,
+      "y_m": 6.875
+    },
+    {
+      "id": "E3",
+      "logical_node": [
+        0,
+        4
+      ],
+      "distance_edges": 14,
+      "x_m": 1.875,
+      "y_m": 11.875
+    },
+    {
+      "id": "E4",
+      "logical_node": [
+        2,
+        3
+      ],
+      "distance_edges": 13,
+      "x_m": 6.875,
+      "y_m": 9.375
+    },
+    {
+      "id": "E5",
+      "logical_node": [
+        3,
+        1
+      ],
+      "distance_edges": 10,
+      "x_m": 9.375,
+      "y_m": 4.375
+    },
+    {
+      "id": "E6",
+      "logical_node": [
+        4,
+        4
+      ],
+      "distance_edges": 10,
+      "x_m": 11.875,
+      "y_m": 11.875
+    }
+  ],
+  "controller_fix": "centred one-way opening is forced corner, not invalid junction"
+}

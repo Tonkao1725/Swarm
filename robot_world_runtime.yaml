@@ -1,0 +1,140 @@
+world:
+  height: 14
+  width: 14
+  step_time: 0.1
+  sample_time: 0.1
+  offset: [0, 0]
+  collision_mode: stop
+
+robot:
+  kinematics:
+    name: diff
+  shape:
+    name: circle
+    radius: 0.25
+  state: [1.0, 1.0, 0.0]
+  vel_max: [0.80, 1.00]
+  color: g
+  sensors:
+    - name: lidar2d
+      range_min: 0.05
+      range_max: 5.0
+      angle_range: 3.141592653589793
+      number: 181
+      noise: false
+      alpha: 0.10
+  plot:
+    show_trail: false
+    show_sensor: false
+    show_goal: false
+
+obstacle:
+  - shape: {name: rectangle, length: 14.00, width: 0.18}
+    state: [7.00, 0.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 4.00, width: 0.18}
+    state: [2.00, 2.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [13.00, 2.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [7.00, 4.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [11.00, 4.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 4.00, width: 0.18}
+    state: [4.00, 6.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 4.00, width: 0.18}
+    state: [10.00, 6.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [1.00, 8.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [7.00, 8.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [13.00, 8.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [3.00, 10.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 2.00, width: 0.18}
+    state: [9.00, 10.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 4.00, width: 0.18}
+    state: [8.00, 12.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 14.00, width: 0.18}
+    state: [7.00, 14.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 14.00}
+    state: [0.00, 7.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [2.00, 3.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 6.00}
+    state: [4.00, 7.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [4.00, 13.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [6.00, 3.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [6.00, 7.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [6.00, 11.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [8.00, 1.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [8.00, 5.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [10.00, 3.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [10.00, 9.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 2.00}
+    state: [10.00, 13.00, 0.0]
+    color: k
+
+  - shape: {name: rectangle, length: 0.18, width: 14.00}
+    state: [14.00, 7.00, 0.0]
+    color: k
+
+# ACTIVE ENERGY SOURCE FOR HUD: E_FIXED_NE (11.875000, 11.875000)

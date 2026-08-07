@@ -1,0 +1,31 @@
+# Python environments and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Simulation output, diagnostics, and generated reports
+results/
+*.log
+*.log.err
+*_TEST_REPORT.json
+maze_clearance_report.json
+maze_preview.png
+
+# Runtime and temporary files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# IDE and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
