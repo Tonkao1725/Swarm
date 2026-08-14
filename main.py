@@ -43,6 +43,7 @@ from wheel_model import (
 from working_memory import WorkingMemory
 from world_builder import build_runtime_world
 from sim_hud import SimulationHUD
+from swarm_baseline import BaselineSwarmRunner
 
 
 BASE_WORLD_FILE = PROJECT_ROOT / "config" / "robot_world.yaml"
@@ -93,6 +94,14 @@ def main() -> int:
         raise ValueError(
             "FORAGING_TRIPS must be at least 1"
         )
+    scout_count = int(os.environ.get("SWARM_SCOUT_COUNT", "1"))
+    swarm_duration_s = float(os.environ.get("SWARM_SIM_DURATION_S", "300"))
+    if scout_count < 1 or scout_count > 4:
+        raise ValueError("SWARM_SCOUT_COUNT must be between 1 and 4")
+    if swarm_duration_s <= 0.0:
+        raise ValueError("SWARM_SIM_DURATION_S must be greater than 0")
+    if scout_count > 1 and experiment_mode.mode.value != "baseline":
+        raise ValueError("Multi-Scout runs currently require SWARM_EXPERIMENT_MODE=baseline")
     batch_results_root_raw = os.environ.get("SWARM_RESULTS_ROOT", "").strip()
     batch_results_root = (
         Path(batch_results_root_raw).resolve()
@@ -121,6 +130,10 @@ def main() -> int:
         trip_count=trip_count,
         memory_enabled=experiment_mode.memory_enabled,
         route_experience_enabled=experiment_mode.route_experience_enabled,
+        # A successful current-project route should be a strong but still
+        # bounded preference when a later Trip faces the same local choice.
+        # It remains subordinate to the win-shift eligibility filter.
+        experience_action_bonus=10.0,
     )
 
     # Controlled experiment: one fixed source at the upper-right corner.
@@ -171,6 +184,19 @@ def main() -> int:
         "experiment_mode_matrix": all_mode_snapshots(),
         "experiment_mode_environment_variable": "SWARM_EXPERIMENT_MODE",
         "trip_count": trip_count,
+        "swarm_baseline": {
+            "enabled": scout_count > 1,
+            "scout_count": scout_count,
+            "trip_count_per_scout": trip_count,
+            "duration_s": swarm_duration_s,
+            "policy": "LOCAL_REACTIVE_45_DEGREE_FULL_FORAGING_CYCLE",
+            "working_memory_enabled": False,
+            "experience_memory_enabled": False,
+            "hormone_enabled": False,
+            "exchange_enabled": False,
+            "shared_map_created": False,
+            "return_navigation": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
+        },
         "trip_control_environment_variable": (
             "FORAGING_TRIPS"
         ),
@@ -338,10 +364,51 @@ def main() -> int:
         ],
     }
 
+    # Metadata is evidence for a specific runtime condition.  Do not describe
+    # the memory-capable controller as if it were active in a multi-Scout
+    # Baseline run.
+    if scout_count > 1 and experiment_mode.mode.value == "baseline":
+        run_config.update({
+            "navigation_model": "MEMORY_FREE_LOCAL_REACTIVE_BASELINE",
+            "decision_policy": (
+                "CURRENT_TOF_LOCAL_AVOIDANCE; STRICT_LOS_SOLAR; "
+                "STATELESS_HOME_VECTOR"
+            ),
+            "working_memory_reset_each_trip": False,
+            "experience_memory_persists_across_trips": False,
+            "condition_specific_capabilities": {
+                "working_memory": False,
+                "experience_memory": False,
+                "exchange": False,
+                "artificial_internal_hormone": False,
+                "route_breadcrumbs": False,
+                "reactive_exploration": True,
+                "nest_cue": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
+                "nest_cue_definition": (
+                    "IDEALIZED_COMMON_STATELESS_NEST_HOMING_CUE; "
+                    "instantaneous nest direction only; no route, history, "
+                    "map, or planner"
+                ),
+            },
+            "available_system_capabilities": {
+                "working_memory": True,
+                "experience_memory": True,
+                "exchange": True,
+                "artificial_internal_hormone": True,
+            },
+        })
+
     env = backend = logger = trace = hud = None
-    memory = WorkingMemory()
+    memory = WorkingMemory(
+        # Adjacent maze corridors can be roughly 0.3 m apart at the robot
+        # centre line.  A 0.38 m loop radius therefore merged distinct
+        # corridors and discarded a breadcrumb suffix that was still needed
+        # for physical backtracking.  Keep pruning, but only for a true
+        # revisit of the same local route.
+        loop_closure_radius_m=0.12,
+    )
     experience = ExperienceMemory()
-    if not experiment_mode.memory_enabled:
+    if not experiment_mode.experience_memory_enabled:
         experience.clear_persistent_routes()
 
     try:
@@ -353,6 +420,45 @@ def main() -> int:
             results_root=batch_results_root,
             run_id=batch_run_id,
         )
+
+        if scout_count > 1:
+            logger.snapshot_sources([
+                PROJECT_ROOT / "main.py", BASE_WORLD_FILE,
+                runtime_world_file, SOURCE_ROOT / "swarm_baseline.py",
+                SOURCE_ROOT / "irsim_range_sensor.py",
+                SOURCE_ROOT / "result_logger.py",
+            ])
+            logger.log_event(
+                "SWARM_BASELINE_START",
+                f"seed={seed}; scouts={scout_count}; duration_s={swarm_duration_s}; "
+                "WM=off; EM=off; hormone=off; exchange=off",
+            )
+            result = BaselineSwarmRunner(
+                env=env, run_dir=logger.run_dir, energy_sensor=energy_sensor,
+                seed=seed, scout_count=scout_count,
+                duration_s=swarm_duration_s, trip_count=trip_count,
+                render_enabled=render_enabled,
+            ).run()
+            logger.log_event(
+                "SWARM_BASELINE_COMPLETE",
+                f"scouts={scout_count}; engineering={result['engineering_status']}; "
+                f"mission={result['mission_outcome']}; "
+                f"nest_energy={result['nest_energy_units']}",
+            )
+            if render_enabled:
+                logger.save_final_figure()
+            logger.mark_completed(
+                mission_outcome=result["mission_outcome"],
+                experimental_validity=result["experimental_validity"],
+            )
+            print(
+                "Baseline multi-Scout simulation completed: "
+                f"engineering={result['engineering_status']}; "
+                f"mission={result['mission_outcome']}; "
+                f"validity={result['experimental_validity']}"
+            )
+            print(logger.run_dir)
+            return 0
 
         initial = env.get_robot_state().reshape(-1)
         initial_pose = RobotPose(

@@ -105,11 +105,24 @@ def collect_row(
     metadata = read_json(run_dir / "metadata.json")
 
     status = str(foraging.get("status") or motion.get("status") or "NO_SUMMARY")
+    multi_trip = "completed_trip_count" in foraging
+    energy_collected = (
+        foraging.get("nest_energy_units", 0) > 0
+        if multi_trip
+        else foraging.get("energy_collected") is True
+    )
+    trips_completed = (
+        foraging.get("completed_trip_count")
+        == foraging.get("requested_trip_count")
+        if multi_trip
+        else True
+    )
     passed = (
         process_return_code == 0
         and status == "PASS"
-        and foraging.get("energy_collected") is True
+        and energy_collected
         and foraging.get("home_reached") is True
+        and trips_completed
     )
 
     return {
@@ -123,7 +136,7 @@ def collect_row(
         "process_return_code": process_return_code,
         "timed_out": timed_out,
         "energy_endpoint": foraging.get("detected_endpoint_id", ""),
-        "energy_collected": foraging.get("energy_collected", False),
+        "energy_collected": energy_collected,
         "home_reached": foraging.get("home_reached", False),
         "simulation_time_s": motion.get("simulation_time_s", ""),
         "wall_clock_s": round(wall_clock_s, 4),
@@ -139,7 +152,7 @@ def collect_row(
         ),
         "return_command_count": foraging.get(
             "return_command_count",
-            count_csv_rows(run_dir / "return_replay.csv"),
+            count_csv_rows(run_dir / "return_navigation.csv"),
         ),
         "working_memory_command_count": foraging.get("working_memory_command_count", ""),
         "junction_cluster_count": foraging.get("junction_cluster_count", ""),
@@ -279,10 +292,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        default="memory_only",
+        default="experience_memory",
         choices=[
-            "baseline", "memory_only", "rat_exchange",
-            "memory_exchange", "all",
+            "baseline", "working_memory", "experience_memory",
+            "rat_exchange", "code_exchange", "all",
         ],
     )
     parser.add_argument(

@@ -6,9 +6,10 @@ from typing import Any
 
 class ExperimentMode(str, Enum):
     BASELINE="baseline"
-    MEMORY_ONLY="memory_only"
+    WORKING_MEMORY="working_memory"
+    EXPERIENCE_MEMORY="experience_memory"
     RAT_EXCHANGE="rat_exchange"
-    MEMORY_EXCHANGE="memory_exchange"
+    CODE_EXCHANGE="code_exchange"
     ALL="all"
 
 class ExchangeType(str, Enum):
@@ -21,8 +22,8 @@ class ExchangeType(str, Enum):
 class ExperimentModeConfig:
     mode: ExperimentMode
     display_name: str
-    memory_enabled: bool
-    route_experience_enabled: bool
+    working_memory_enabled: bool
+    experience_memory_enabled: bool
     exchange_enabled: bool
     exchange_type: ExchangeType
     hormone_enabled: bool
@@ -32,6 +33,17 @@ class ExperimentModeConfig:
     @property
     def ready_for_valid_experiment(self)->bool:
         return self.implementation_status=="READY"
+
+    # Compatibility names for the controller and historical run metadata.
+    # They preserve the old configuration interface while making the two
+    # research memory architectures explicit at the experiment boundary.
+    @property
+    def memory_enabled(self) -> bool:
+        return self.working_memory_enabled
+
+    @property
+    def route_experience_enabled(self) -> bool:
+        return self.experience_memory_enabled
 
     def snapshot(self)->dict[str,Any]:
         data=asdict(self)
@@ -44,8 +56,8 @@ _MODE_TABLE = {
     ExperimentMode.BASELINE: ExperimentModeConfig(
         mode=ExperimentMode.BASELINE,
         display_name="Baseline",
-        memory_enabled=False,
-        route_experience_enabled=False,
+        working_memory_enabled=False,
+        experience_memory_enabled=False,
         exchange_enabled=False,
         exchange_type=ExchangeType.NONE,
         hormone_enabled=False,
@@ -54,25 +66,38 @@ _MODE_TABLE = {
             "No cross-trip memory, no exchange, no hormone."
         ),
     ),
-    ExperimentMode.MEMORY_ONLY: ExperimentModeConfig(
-        mode=ExperimentMode.MEMORY_ONLY,
-        display_name="Memory Only",
-        memory_enabled=True,
-        route_experience_enabled=True,
+    ExperimentMode.WORKING_MEMORY: ExperimentModeConfig(
+        mode=ExperimentMode.WORKING_MEMORY,
+        display_name="Working Memory",
+        working_memory_enabled=True,
+        experience_memory_enabled=False,
         exchange_enabled=False,
         exchange_type=ExchangeType.NONE,
         hormone_enabled=False,
         implementation_status="READY",
         research_description=(
-            "Trip-local Working Memory and persistent successful "
-            "decision Experience Memory."
+            "Trip-local Working Memory only; no cross-trip experience."
+        ),
+    ),
+    ExperimentMode.EXPERIENCE_MEMORY: ExperimentModeConfig(
+        mode=ExperimentMode.EXPERIENCE_MEMORY,
+        display_name="Experience Memory",
+        working_memory_enabled=True,
+        experience_memory_enabled=True,
+        exchange_enabled=False,
+        exchange_type=ExchangeType.NONE,
+        hormone_enabled=False,
+        implementation_status="READY",
+        research_description=(
+            "Trip-local Working Memory plus successful cross-trip "
+            "Experience Memory as a probabilistic decision bias."
         ),
     ),
     ExperimentMode.RAT_EXCHANGE: ExperimentModeConfig(
         mode=ExperimentMode.RAT_EXCHANGE,
         display_name="Rat Exchange",
-        memory_enabled=True,
-        route_experience_enabled=True,
+        working_memory_enabled=True,
+        experience_memory_enabled=True,
         exchange_enabled=True,
         exchange_type=ExchangeType.RAT_NO_DIRECTION,
         hormone_enabled=False,
@@ -81,11 +106,11 @@ _MODE_TABLE = {
             "Exchange source quality/status without direction."
         ),
     ),
-    ExperimentMode.MEMORY_EXCHANGE: ExperimentModeConfig(
-        mode=ExperimentMode.MEMORY_EXCHANGE,
-        display_name="Memory Exchange",
-        memory_enabled=True,
-        route_experience_enabled=True,
+    ExperimentMode.CODE_EXCHANGE: ExperimentModeConfig(
+        mode=ExperimentMode.CODE_EXCHANGE,
+        display_name="Code Exchange",
+        working_memory_enabled=True,
+        experience_memory_enabled=True,
         exchange_enabled=True,
         exchange_type=ExchangeType.DIRECTIONAL_EXPERIENCE,
         hormone_enabled=False,
@@ -97,8 +122,8 @@ _MODE_TABLE = {
     ExperimentMode.ALL: ExperimentModeConfig(
         mode=ExperimentMode.ALL,
         display_name="All",
-        memory_enabled=True,
-        route_experience_enabled=True,
+        working_memory_enabled=True,
+        experience_memory_enabled=True,
         exchange_enabled=True,
         exchange_type=ExchangeType.BEST_EXPERIENCE,
         hormone_enabled=True,
@@ -111,11 +136,15 @@ _MODE_TABLE = {
 
 def resolve_experiment_mode(raw:str|None=None)->ExperimentModeConfig:
     value=raw if raw is not None else os.environ.get(
-        "SWARM_EXPERIMENT_MODE",ExperimentMode.MEMORY_ONLY.value)
+        "SWARM_EXPERIMENT_MODE",ExperimentMode.EXPERIENCE_MEMORY.value)
     normalized=str(value).strip().lower()
-    normalized={"1":"baseline","2":"memory_only","3":"rat_exchange",
-                "4":"memory_exchange","5":"all","memory":"memory_only",
-                "rat":"rat_exchange"}.get(normalized,normalized)
+    normalized={
+        "1":"baseline", "2":"working_memory", "3":"experience_memory",
+        "4":"rat_exchange", "5":"code_exchange", "6":"all",
+        "memory_only":"experience_memory", "memory":"experience_memory",
+        "wm":"working_memory", "em":"experience_memory",
+        "rat":"rat_exchange", "memory_exchange":"code_exchange",
+    }.get(normalized,normalized)
     try:
         mode=ExperimentMode(normalized)
     except ValueError as exc:
@@ -128,7 +157,7 @@ def resolve_experiment_mode(raw:str|None=None)->ExperimentModeConfig:
         raise RuntimeError(
             f"Mode '{mode.value}' is defined but not valid for research runs yet. "
             "It requires multi-robot Encounter/Exchange and/or AIH. "
-            "Use baseline or memory_only now.")
+            "Use baseline, working_memory, or experience_memory now.")
     return cfg
 
 def all_mode_snapshots()->list[dict[str,Any]]:

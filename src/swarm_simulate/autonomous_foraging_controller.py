@@ -45,6 +45,10 @@ class AutonomousForagingConfig:
     # Light-following stabilization. A light-guided turn must be followed by
     # real forward progress before another light turn is permitted.
     light_turn_release_distance_m: float = 0.25
+    # When an otherwise valid light approach is aborted for a local safety
+    # reason, require physical progress before it may re-enter.  This prevents
+    # left/right chatter at one blocked pose without suppressing exploration.
+    light_abort_reentry_progress_m: float = 0.25
 
     # Return-home breadcrumb follower. Used only after Energy collection.
     return_waypoint_tolerance_m: float = 0.16
@@ -60,6 +64,11 @@ class AutonomousForagingConfig:
     return_recovery_turn_step_deg: float = 8.0
     return_recovery_forward_step_m: float = 0.10
     return_recovery_progress_epsilon_m: float = 0.03
+    # If rotation is physically blocked at an inside corner while reversing a
+    # current-trip breadcrumb, retreat a very short distance along the segment
+    # just traversed before retrying the geometric turn.
+    return_turn_clearance_retreat_m: float = 0.12
+    return_turn_clearance_max_attempts: int = 2
 
 
 @dataclass
@@ -105,12 +114,24 @@ class AutonomousForagingController:
         self.previous_snapshot=None
         self.pending_redecision=False
         self.latest_energy_reading=None
+        # Ports that advertised open space but rejected a physical turn.  This
+        # is a current-trip, local body-clearance observation—not a map—and is
+        # cleared at every trip boundary.
+        self.rejected_decision_ports:set[tuple[str,int]]=set()
 
         # Hybrid light-following state:
         # False = light may request a turn
         # True  = keep the chosen heading until enough forward progress occurs
         self.light_turn_locked = False
         self.light_progress_since_turn_m = 0.0
+        self.light_approach_active = False
+        self.light_reentry_distance_remaining_m = 0.0
+        self.light_first_valid_distance_m: float | None = None
+        self.light_first_valid_time_s: float | None = None
+        self.light_approach_start_time_s: float | None = None
+        self.light_approach_min_distance_m: float | None = None
+        self.light_approach_abort_count = 0
+        self.light_approach_abort_reasons: dict[str, int] = {}
 
         # Experience is recalled only at actual Decision Points.
         self.experience_decision_recall_count = 0
@@ -150,6 +171,10 @@ class AutonomousForagingController:
         p=DecisionPoint(f"D{len(self.decision_points)+1:03d}",s.pose.x_m,s.pose.y_m)
         self.decision_points.append(p)
         return p
+
+    @property
+    def _working_memory_active(self) -> bool:
+        return self.config.memory_enabled
 
     def _release_latch(self,pose)->None:
         if self.active_decision_key is None:return
@@ -193,7 +218,7 @@ class AutonomousForagingController:
         result=self.motion.turn_left(90.0) if action=='TURN_LEFT' else self.motion.turn_right(90.0)
         self.motion.stop()
         if abs(result.actual_value)<math.radians(70): raise RuntimeError(f'{action} failed')
-        if record:
+        if record and self._working_memory_active:
             self.memory.append_turn(action,source)
             pose = self.motion.backend.read_pose()
             self.memory.record_turn_pose(
@@ -228,8 +253,13 @@ class AutonomousForagingController:
             ):
                 self.light_turn_locked = False
                 self.light_progress_since_turn_m = 0.0
+        if actual > 0.0 and self.light_reentry_distance_remaining_m > 0.0:
+            self.light_reentry_distance_remaining_m = max(
+                0.0,
+                self.light_reentry_distance_remaining_m - actual,
+            )
 
-        if record and actual>1e-9:
+        if record and actual>1e-9 and self._working_memory_active:
             self.memory.append_move(actual,source)
             pose = self.motion.backend.read_pose()
             loop_pruned = self.memory.record_pose(
@@ -301,6 +331,21 @@ class AutonomousForagingController:
         if safe<=self.config.minimum_progress_m:return True
         _,stuck=self._move(safe,record=True,source='DECISION_POINT_CENTER',phase='EXPLORE')
         return not stuck
+
+    def _baseline_choice(self, actions: list[str], light) -> tuple[str, str]:
+        """Choose from immediate sensing only, with no route/branch memory."""
+        if light.guidance_active:
+            return (
+                max(
+                    actions,
+                    key=lambda action: (
+                        self._solar(light, action),
+                        {"MOVE_FORWARD": 2, "TURN_LEFT": 1, "TURN_RIGHT": 0}[action],
+                    ),
+                ),
+                "BASELINE_VISIBLE_LIGHT_DIRECTION",
+            )
+        return self.rng.choice(actions), "BASELINE_STOCHASTIC_LOCAL_CHOICE"
 
     @staticmethod
     def _solar(reading,action):
@@ -415,7 +460,6 @@ class AutonomousForagingController:
         )[0]
         return chosen, details
 
-
     def _recalled_experience_action(
         self,
         *,
@@ -445,10 +489,60 @@ class AutonomousForagingController:
         if len(actions) < 2:
             return False
 
+        if not self._working_memory_active:
+            light = self._sample_energy("BASELINE_JUNCTION_DECISION")
+            chosen, reason = self._baseline_choice(actions, light)
+            try:
+                self._execute_turn(
+                    chosen, record=False, source="BASELINE_DECISION"
+                )
+            except RuntimeError:
+                self.previous_snapshot = self.sensor.read()
+                return False
+            post = self.sensor.read()
+            if post.front_m <= self.config.wall_stop_distance_m:
+                inverse = (
+                    "TURN_RIGHT" if chosen == "TURN_LEFT" else
+                    "TURN_LEFT" if chosen == "TURN_RIGHT" else None
+                )
+                if inverse:
+                    self._execute_turn(
+                        inverse, record=False, source="BASELINE_DECISION_ABORT"
+                    )
+                self.previous_snapshot = self.sensor.read()
+                return False
+            self.trace.log_decision({
+                "sim_time_s": s.sim_time_s, "phase": "EXPLORE",
+                "junction_key": "", "x_m": s.pose.x_m, "y_m": s.pose.y_m,
+                "heading_deg": math.degrees(s.pose.theta_rad),
+                "trip_id": self.current_trip_id, "decision_ordinal": "",
+                "anchor_distance_m": "", "branch_visit_counts": "",
+                "branch_global_directions": "", "left_m": s.left_m,
+                "front_m": s.front_m, "right_m": s.right_m,
+                "open_actions": "|".join(actions), "unvisited_actions": "",
+                "chosen_action": chosen, "reason": reason,
+                "random_seed": self.config.random_seed,
+                "working_memory_route": "", "solar_left": light.solar_left,
+                "solar_center": light.solar_center, "solar_right": light.solar_right,
+                "solar_max": light.solar_max,
+                "strongest_light_direction": light.strongest_direction,
+                "light_guidance_active": light.guidance_active,
+            })
+            self.previous_snapshot = post
+            return True
+
         point = self._resolve_decision_point(s)
         heading = self._heading_quadrant(
             s.pose.theta_rad
         )
+        observed_actions = list(actions)
+        actions = [
+            action for action in observed_actions
+            if (point.key, self._global_direction(heading, action))
+            not in self.rejected_decision_ports
+        ]
+        if not actions:
+            return False
         ordinal = self.trip_decision_ordinal
         light = self._sample_energy(
             "JUNCTION_DECISION"
@@ -495,7 +589,18 @@ class AutonomousForagingController:
                     ),
                 )
                 reason = "VISIBLE_LIGHT_DIRECTION"
-                details = {}
+                details = {
+                    action: {
+                        "trip_visits": self.memory.current_trip_port_visits(
+                            decision_point_key=point.key,
+                            global_direction=self._global_direction(
+                                heading,
+                                action,
+                            ),
+                        ),
+                    }
+                    for action in actions
+                }
         else:
             chosen, details = self._weighted_choice(
                 actions,
@@ -547,6 +652,9 @@ class AutonomousForagingController:
                 decision_point_key=point.key,
                 global_direction=chosen_global_direction,
             )
+            self.rejected_decision_ports.add(
+                (point.key, chosen_global_direction)
+            )
             pose = self.motion.backend.read_pose()
             self.trace.log_recovery({
                 "sim_time_s": self.motion.backend.time_s,
@@ -559,8 +667,14 @@ class AutonomousForagingController:
                 "heading_deg": math.degrees(pose.theta_rad),
                 "working_memory_route": self.memory.route_string,
             })
+            # This is not a dead end: the robot remains at this same local
+            # junction and must try another physically feasible exit.  The
+            # old False path incorrectly backtracked to an earlier junction,
+            # producing an impossible 180-degree turn in a tight corner.
+            self.active_decision_key = point.key
+            self.pending_redecision = True
             self.previous_snapshot = self.sensor.read()
-            return False
+            return True
 
         if (
             light.guidance_active
@@ -601,7 +715,29 @@ class AutonomousForagingController:
                 self.memory.path.pop()
             self.light_turn_locked = False
             self.light_progress_since_turn_m = 0.0
-            return False
+            self.memory.record_decision_port(
+                decision_point_key=point.key,
+                global_direction=chosen_global_direction,
+            )
+            self.rejected_decision_ports.add(
+                (point.key, chosen_global_direction)
+            )
+            pose = self.motion.backend.read_pose()
+            self.trace.log_recovery({
+                "sim_time_s": self.motion.backend.time_s,
+                "phase": "EXPLORE",
+                "reason": "DECISION_FORWARD_BLOCKED",
+                "requested_distance_m": 0.0,
+                "actual_distance_m": 0.0,
+                "x_m": pose.x_m,
+                "y_m": pose.y_m,
+                "heading_deg": math.degrees(pose.theta_rad),
+                "working_memory_route": self.memory.route_string,
+            })
+            self.active_decision_key = point.key
+            self.pending_redecision = True
+            self.previous_snapshot = self.sensor.read()
+            return True
 
         self.memory.record_decision_port(
             decision_point_key=point.key,
@@ -635,7 +771,7 @@ class AutonomousForagingController:
                 s.pose.x_m, s.pose.y_m
             ),
             "branch_visit_counts": "|".join(
-                f"{action}={details[action]['trip_visits']}"
+                f"{action}={details.get(action, {}).get('trip_visits', '')}"
                 for action in actions
             ),
             "branch_global_directions": "|".join(
@@ -678,21 +814,37 @@ class AutonomousForagingController:
 
     def _backtrack(self)->None:
         if not self.memory.junctions:raise RuntimeError('All sampled branches exhausted without finding Energy')
-        rec=self.memory.junctions[-1]; suffix=self.memory.path[rec.path_index_before_decision:]
-        pose=self.motion.backend.read_pose(); self.trace.log_recovery({"sim_time_s":self.motion.backend.time_s,"phase":"BACKTRACK","reason":f"BACKTRACK_START:{rec.decision_point_key}","requested_distance_m":sum(cmd.value for cmd in suffix if cmd.command=='MOVE_FORWARD'),"actual_distance_m":0.0,"x_m":pose.x_m,"y_m":pose.y_m,"heading_deg":math.degrees(pose.theta_rad),"working_memory_route":self.memory.route_string})
-        if suffix:
-            self._u_turn('BACKTRACK')
-            for cmd in reversed(suffix):
-                if cmd.command=='MOVE_FORWARD':
-                    actual,stuck=self._move(cmd.value,record=False,source='BACKTRACK',phase='BACKTRACK')
-                    if stuck or abs(actual-cmd.value)>self.config.movement_error_tolerance_m:raise RuntimeError('Backtrack failed')
-                elif cmd.command=='TURN_LEFT':self._execute_turn('TURN_RIGHT',record=False,source='BACKTRACK')
-                elif cmd.command=='TURN_RIGHT':self._execute_turn('TURN_LEFT',record=False,source='BACKTRACK')
-            self._u_turn('BACKTRACK_RESTORE')
+        rec=self.memory.junctions[-1]
+        target_index = max(
+            (index for index, crumb in enumerate(self.memory.breadcrumbs)
+             if crumb.path_index <= rec.path_index_before_decision),
+            default=0,
+        )
+        target = self.memory.breadcrumbs[target_index]
+        pose=self.motion.backend.read_pose(); self.trace.log_recovery({"sim_time_s":self.motion.backend.time_s,"phase":"BACKTRACK","reason":f"BACKTRACK_START:{rec.decision_point_key}","requested_distance_m":math.hypot(target.x_m-pose.x_m,target.y_m-pose.y_m),"actual_distance_m":0.0,"x_m":pose.x_m,"y_m":pose.y_m,"heading_deg":math.degrees(pose.theta_rad),"working_memory_route":self.memory.route_string})
+        error = self._return_home(
+            target,
+            stop_index=target_index,
+            restore_heading=False,
+        )
+        if error > self.config.return_waypoint_tolerance_m:
+            raise RuntimeError("Breadcrumb backtrack did not reach decision point")
         self.memory.truncate_path(rec.path_index_before_decision)
+        del self.memory.breadcrumbs[target_index + 1 :]
         self.memory.junctions.pop()
         pose=self.motion.backend.read_pose(); self.trace.log_recovery({"sim_time_s":self.motion.backend.time_s,"phase":"BACKTRACK","reason":f"BACKTRACK_COMPLETE:{rec.decision_point_key}","requested_distance_m":0.0,"actual_distance_m":0.0,"x_m":pose.x_m,"y_m":pose.y_m,"heading_deg":math.degrees(pose.theta_rad),"working_memory_route":self.memory.route_string})
         self.active_decision_key=None; self.pending_redecision=True; self.previous_snapshot=self.sensor.read()
+
+    def _recover_exploration_dead_end(self) -> None:
+        """Use WM backtracking when enabled; baseline has only local avoidance."""
+        if self._working_memory_active and self.memory.junctions:
+            self._backtrack()
+            return
+        if not self._working_memory_active:
+            self._u_turn("BASELINE_LOCAL_DEAD_END")
+            self.previous_snapshot = self.sensor.read()
+            return
+        raise RuntimeError("All sampled branches exhausted without finding Energy")
 
     def _resolve_redecision(self)->None:
         while self.pending_redecision:
@@ -700,21 +852,187 @@ class AutonomousForagingController:
             if self._select_at_decision_point(self.sensor.read()):return
             self._backtrack()
 
-    def _follow_light(self,s,reading)->bool:
-        if not reading.guidance_active or not reading.line_of_sight_clear:return False
-        if self.light_turn_locked:return False
-        if reading.strongest_direction not in {'LEFT','RIGHT'}:return False
-        action='TURN_LEFT' if reading.strongest_direction=='LEFT' else 'TURN_RIGHT'
-        if action not in self._open_actions(s):return False
-        self._execute_turn(action,record=True,source='VISIBLE_LIGHT')
-        post=self.sensor.read()
-        if post.front_m<=self.config.wall_stop_distance_m:
-            self._execute_turn('TURN_RIGHT' if action=='TURN_LEFT' else 'TURN_LEFT',record=False,source='LIGHT_ABORT')
-            if self.memory.path and self.memory.path[-1].command in {'TURN_LEFT','TURN_RIGHT'}:self.memory.path.pop()
-            return False
-        self.light_turn_locked = True
+    def _log_light_approach_event(
+        self,
+        *,
+        stage: str,
+        snapshot,
+        reading,
+        reason: str = "",
+        selected_action: str = "",
+    ) -> None:
+        self.trace.log_action_audit({
+            "sim_time_s": self.motion.backend.time_s,
+            "stage": stage,
+            "junction_id": "",
+            "x_m": snapshot.pose.x_m,
+            "y_m": snapshot.pose.y_m,
+            "heading_deg": math.degrees(snapshot.pose.theta_rad),
+            "heading_quadrant": self._heading_quadrant(snapshot.pose.theta_rad),
+            "left_m": snapshot.left_m,
+            "front_m": snapshot.front_m,
+            "right_m": snapshot.right_m,
+            "requested_action": reading.strongest_direction,
+            "requested_global_direction": "",
+            "requested_clearance_m": self.config.wall_stop_distance_m,
+            "open_actions": "|".join(self._open_actions(snapshot)),
+            "safe_actions": "|".join(self._open_actions(snapshot)),
+            "selected_action": selected_action,
+            "selected_global_direction": "",
+            "action_rejected": bool(reason),
+            "rejection_reason": reason,
+            "working_memory_route": self.memory.route_string,
+        })
+
+    def _begin_light_approach(self, snapshot, reading) -> None:
+        self.light_approach_active = True
+        self.light_approach_start_time_s = self.motion.backend.time_s
+        self.light_approach_min_distance_m = reading.distance_m
+        self._log_light_approach_event(
+            stage="LIGHT_APPROACH_START",
+            snapshot=snapshot,
+            reading=reading,
+        )
+
+    def _abort_light_approach(self, snapshot, reading, reason: str) -> None:
+        if not self.light_approach_active:
+            return
+        self.light_approach_active = False
+        self.light_turn_locked = False
         self.light_progress_since_turn_m = 0.0
-        self.previous_snapshot=post
+        self.light_reentry_distance_remaining_m = (
+            self.config.light_abort_reentry_progress_m
+        )
+        self.light_approach_abort_count += 1
+        self.light_approach_abort_reasons[reason] = (
+            self.light_approach_abort_reasons.get(reason, 0) + 1
+        )
+        self._log_light_approach_event(
+            stage="LIGHT_APPROACH_ABORT",
+            snapshot=snapshot,
+            reading=reading,
+            reason=reason,
+        )
+
+    def _advance_light_approach(self, snapshot, reading) -> bool:
+        """Give a valid local light signal priority until collection/abort.
+
+        Steering uses only the simulated solar channels, current ToF openings,
+        and collision-checked movement.  No source coordinate or route is
+        consulted.  Returning True means this control cycle was consumed, so
+        generic Explore/junction logic cannot preempt an active approach.
+        """
+        valid_signal = (
+            reading.guidance_active
+            and reading.line_of_sight_clear
+            and reading.strongest_direction in {"LEFT", "CENTER", "RIGHT"}
+        )
+        if valid_signal and self.light_first_valid_distance_m is None:
+            self.light_first_valid_distance_m = reading.distance_m
+            self.light_first_valid_time_s = self.motion.backend.time_s
+
+        if not self.light_approach_active:
+            if not valid_signal or self.light_reentry_distance_remaining_m > 0.0:
+                return False
+            self._begin_light_approach(snapshot, reading)
+
+        if reading.detected:
+            return False
+        if not reading.line_of_sight_clear:
+            self._abort_light_approach(snapshot, reading, "LOS_LOST")
+            return False
+        if not reading.guidance_active or reading.strongest_direction == "NONE":
+            self._abort_light_approach(snapshot, reading, "SIGNAL_LOST")
+            return False
+
+        if self.light_approach_min_distance_m is None:
+            self.light_approach_min_distance_m = reading.distance_m
+        else:
+            self.light_approach_min_distance_m = min(
+                self.light_approach_min_distance_m,
+                reading.distance_m,
+            )
+
+        actions = self._open_actions(snapshot)
+        direction_action = {
+            "LEFT": "TURN_LEFT",
+            "RIGHT": "TURN_RIGHT",
+        }.get(reading.strongest_direction)
+        if direction_action is not None and not self.light_turn_locked:
+            if direction_action not in actions:
+                self._abort_light_approach(
+                    snapshot, reading, "LIGHT_DIRECTION_NOT_SAFE"
+                )
+                return False
+            try:
+                self._execute_turn(
+                    direction_action,
+                    record=True,
+                    source="LIGHT_APPROACH_STEER",
+                )
+            except RuntimeError:
+                self._abort_light_approach(
+                    snapshot, reading, "LIGHT_TURN_FAILED"
+                )
+                return False
+            post = self.sensor.read()
+            if post.front_m <= self.config.wall_stop_distance_m:
+                inverse = (
+                    "TURN_RIGHT"
+                    if direction_action == "TURN_LEFT"
+                    else "TURN_LEFT"
+                )
+                self._execute_turn(
+                    inverse, record=False, source="LIGHT_APPROACH_ABORT"
+                )
+                if (
+                    self._working_memory_active
+                    and self.memory.path
+                    and self.memory.path[-1].command in {"TURN_LEFT", "TURN_RIGHT"}
+                ):
+                    self.memory.path.pop()
+                self._abort_light_approach(
+                    snapshot, reading, "LIGHT_TURN_PATH_BLOCKED"
+                )
+                return False
+            self.light_turn_locked = True
+            self.light_progress_since_turn_m = 0.0
+            self.previous_snapshot = post
+            self._log_light_approach_event(
+                stage="LIGHT_APPROACH_STEER",
+                snapshot=snapshot,
+                reading=reading,
+                selected_action=direction_action,
+            )
+            return True
+
+        safe = min(
+            self.config.movement_step_m,
+            max(0.0, snapshot.front_m - self.config.wall_stop_distance_m),
+        )
+        if safe <= self.config.minimum_progress_m:
+            self._abort_light_approach(
+                snapshot, reading, "LIGHT_FORWARD_PATH_BLOCKED"
+            )
+            return False
+        actual, stuck = self._move(
+            safe,
+            record=True,
+            source="LIGHT_APPROACH_FORWARD",
+            phase="LIGHT_APPROACH",
+        )
+        if stuck or actual <= self.config.minimum_progress_m:
+            self._abort_light_approach(
+                snapshot, reading, "LIGHT_FORWARD_PROGRESS_FAILED"
+            )
+            return False
+        self._log_light_approach_event(
+            stage="LIGHT_APPROACH_FORWARD",
+            snapshot=snapshot,
+            reading=reading,
+            selected_action="MOVE_FORWARD",
+        )
+        self.previous_snapshot = self.sensor.read()
         return True
 
     @staticmethod
@@ -921,21 +1239,65 @@ class AutonomousForagingController:
 
         return False
 
-    def _return_home(self,home)->float:
+    def _retreat_for_return_turn_clearance(self, *, target) -> bool:
+        """Create rotation clearance by backing along the just-used segment.
+
+        This is only used while following a current-Trip breadcrumb after a
+        blocked turn.  It does not select a route, use source coordinates, or
+        issue stored commands: it is a bounded local motion recovery before
+        retrying the same geometric waypoint heading.
+        """
+        pose = self.motion.backend.read_pose()
+        before = math.hypot(target.x_m - pose.x_m, target.y_m - pose.y_m)
+        result = self.motion.move_backward(
+            self.config.return_turn_clearance_retreat_m
+        )
+        self.motion.stop(0.0)
+        actual = abs(result.actual_value)
+        self.total_distance_m += actual
+        current = self.motion.backend.read_pose()
+        after = math.hypot(target.x_m - current.x_m, target.y_m - current.y_m)
+        self.trace.log_return({
+            "sim_time_s": self.motion.backend.time_s,
+            "command": "RETURN_TURN_CLEARANCE_RETREAT",
+            "value": actual,
+            "x_m": current.x_m,
+            "y_m": current.y_m,
+            "heading_deg": math.degrees(current.theta_rad),
+        })
+        return (
+            actual > self.config.minimum_progress_m
+            and after > before + self.config.minimum_progress_m
+        )
+
+    def _return_home(
+        self,
+        home,
+        *,
+        stop_index: int = 0,
+        restore_heading: bool = True,
+    )->float:
         if len(self.memory.breadcrumbs) < 2:
             raise RuntimeError(
                 "Working Memory has no breadcrumb return route"
             )
 
+        if stop_index < 0 or stop_index >= len(self.memory.breadcrumbs):
+            raise ValueError("Invalid breadcrumb stop index")
         waypoint_index = len(self.memory.breadcrumbs) - 2
         iterations = 0
         maximum_iterations = max(
             1000,
             len(self.memory.breadcrumbs) * 80,
         )
-        shortcuts_enabled = True
+        # Follow the recorded current-trip breadcrumb exactly.  In the
+        # branching regression maze, a geometrically near waypoint can sit
+        # across an inside corner; even a very conservative straight-line
+        # shortcut then cuts through the wall.  Exact breadcrumbs retain the
+        # no-map Working Memory return guarantee.
+        shortcuts_enabled = False
 
-        while waypoint_index >= 0:
+        while waypoint_index >= stop_index:
             iterations += 1
             if iterations > maximum_iterations:
                 raise RuntimeError(
@@ -953,7 +1315,7 @@ class AutonomousForagingController:
 
             tolerance = (
                 self.config.home_tolerance_m
-                if waypoint_index == 0
+                if waypoint_index == stop_index
                 else self.config.return_waypoint_tolerance_m
             )
             if distance <= tolerance:
@@ -979,12 +1341,27 @@ class AutonomousForagingController:
             dx = target.x_m - pose.x_m
             dy = target.y_m - pose.y_m
             target_heading = math.atan2(dy, dx)
-            try:
-                self._turn_to_heading(
-                    target_heading,
-                    source="RETURN_BREADCRUMB",
-                )
-            except RuntimeError as exc:
+            turn_error = None
+            for clearance_attempt in range(
+                self.config.return_turn_clearance_max_attempts + 1
+            ):
+                try:
+                    self._turn_to_heading(
+                        target_heading,
+                        source="RETURN_BREADCRUMB",
+                    )
+                    turn_error = None
+                    break
+                except RuntimeError as exc:
+                    turn_error = exc
+                    if clearance_attempt >= (
+                        self.config.return_turn_clearance_max_attempts
+                    ) or not self._retreat_for_return_turn_clearance(
+                        target=target
+                    ):
+                        break
+
+            if turn_error is not None:
                 # A physical turn can finish with a larger-than-expected
                 # residual error near a corner.  This is a recoverable
                 # navigation condition, so use the existing bounded local
@@ -1018,7 +1395,7 @@ class AutonomousForagingController:
                 raise RuntimeError(
                     "Breadcrumb return heading correction failed after "
                     "local recovery"
-                ) from exc
+                ) from turn_error
 
             snapshot = self.sensor.read()
             pose = self.motion.backend.read_pose()
@@ -1035,20 +1412,27 @@ class AutonomousForagingController:
                     - self.config.wall_stop_distance_m,
                 ),
             )
-            # A turn anchor is recorded at the pose where the outbound route
-            # changed direction.  When returning to that anchor, the segment
-            # from the anchor to our current pose was traversed in this same
-            # Trip.  A forward ToF ray can see the adjacent corner and reject
-            # that reverse segment before motion is attempted.  In this one
-            # case, let the collision-checked motion command validate the
-            # already-observed segment instead of treating the ToF margin as
-            # a global obstacle.
+            # The segment to the immediately preceding breadcrumb was
+            # physically traversed in this same Trip.  At an inside corner a
+            # forward ToF ray can see the adjacent wall and reject that valid
+            # reverse segment before motion is attempted.  For this one
+            # adjacent, no-shortcut segment, let collision-checked motion
+            # validate progress; any actual contact still returns ``stuck``
+            # and enters bounded local recovery below.  This is geometric
+            # breadcrumb following, not a replay of motor commands.
             if (
                 safe <= self.config.minimum_progress_m
                 and chosen_index == shortcut_from
-                and target.is_turn_anchor
             ):
                 safe = min(self.config.movement_step_m, remaining)
+                self.trace.log_return({
+                    "sim_time_s": self.motion.backend.time_s,
+                    "command": "FOLLOW_KNOWN_BREADCRUMB_SEGMENT",
+                    "value": safe,
+                    "x_m": pose.x_m,
+                    "y_m": pose.y_m,
+                    "heading_deg": math.degrees(pose.theta_rad),
+                })
             if safe <= self.config.minimum_progress_m:
                 if self._recover_return_blockage(target=target):
                     continue
@@ -1110,27 +1494,70 @@ class AutonomousForagingController:
                 ),
             })
 
-        # Restore the outward HOME orientation for the next Trip.
-        self._turn_to_heading(
-            home.theta_rad,
-            source="HOME_DEPARTURE_ALIGNMENT",
-        )
+        # Restore the outward HOME orientation only at the final nest return;
+        # a local breadcrumb backtrack must retain the arrival heading for the
+        # next decision.
+        if restore_heading:
+            self._turn_to_heading(
+                home.theta_rad,
+                source="HOME_DEPARTURE_ALIGNMENT",
+            )
         pose = self.motion.backend.read_pose()
         return math.hypot(
             pose.x_m - home.x_m,
             pose.y_m - home.y_m,
         )
 
+    def _return_home_baseline(self, home) -> float:
+        """Stateless homing with immediate ToF avoidance.
+
+        This deliberately retains no route, junction, breadcrumb, or learned
+        branch information.  The HOME pose is a per-trip controller reference
+        rather than a map and is discarded after the trip.
+        """
+        maximum_iterations = 5000
+        for _ in range(maximum_iterations):
+            pose = self.motion.backend.read_pose()
+            error = math.hypot(pose.x_m - home.x_m, pose.y_m - home.y_m)
+            if error <= self.config.home_tolerance_m:
+                self._turn_to_heading(home.theta_rad, source="BASELINE_HOME_ALIGNMENT")
+                pose = self.motion.backend.read_pose()
+                return math.hypot(pose.x_m - home.x_m, pose.y_m - home.y_m)
+
+            desired = math.atan2(home.y_m - pose.y_m, home.x_m - pose.x_m)
+            self._turn_to_heading(desired, source="BASELINE_HOME_VECTOR")
+            snapshot = self.sensor.read()
+            safe = min(
+                self.config.movement_step_m,
+                error,
+                max(0.0, snapshot.front_m - self.config.wall_stop_distance_m),
+            )
+            if safe > self.config.minimum_progress_m:
+                _, stuck = self._move(
+                    safe, record=False, source="BASELINE_HOME_VECTOR",
+                    phase="RETURN_HOME",
+                )
+                if not stuck:
+                    continue
+
+            # A wall blocks the direct home vector. Pick only the clearer
+            # immediate side; no past branch choice is consulted or saved.
+            turn = "TURN_LEFT" if snapshot.left_m >= snapshot.right_m else "TURN_RIGHT"
+            self._execute_turn(turn, record=False, source="BASELINE_HOME_AVOID")
+
+        raise RuntimeError("Baseline stateless homing exceeded iteration guard")
+
     def _run_single_trip(self)->dict:
         home=self.motion.backend.read_pose()
         self.motion.stop(
             self.motion.backend.control_period_s
         )
-        self.memory.start_route(
-            x_m=home.x_m,
-            y_m=home.y_m,
-            theta_rad=home.theta_rad,
-        )
+        if self._working_memory_active:
+            self.memory.start_route(
+                x_m=home.x_m,
+                y_m=home.y_m,
+                theta_rad=home.theta_rad,
+            )
         self.previous_snapshot = self.sensor.read()
         energy = self._sample_energy("EXPLORE")
 
@@ -1140,12 +1567,15 @@ class AutonomousForagingController:
             s=self.sensor.read();self._guard(s);self._release_latch(s.pose)
             light=self._sample_energy('EXPLORE')
             if light.detected:energy=light;break
-            if self._follow_light(s,light):energy=self._sample_energy('LIGHT_APPROACH');continue
+            if self._advance_light_approach(s, light):
+                energy=self._sample_energy('LIGHT_APPROACH')
+                continue
             nearest,d=self._nearest_point(s.pose)
-            if self.active_decision_key is None and nearest is not None and d<=self.config.junction_cluster_radius_m and len(self._open_actions(s))>=2:
+            if (self._working_memory_active and self.active_decision_key is None
+                    and nearest is not None and d<=self.config.junction_cluster_radius_m
+                    and len(self._open_actions(s))>=2):
                 if not self._select_at_decision_point(s):
-                    if self.memory.junctions:self._backtrack()
-                    else:self.previous_snapshot=self.sensor.read()
+                    self._recover_exploration_dead_end()
                 energy=self._sample_energy('EXPLORE');continue
             opening,half,_=self._side_opening_transition(s)
             if opening and self.active_decision_key is None:
@@ -1153,25 +1583,23 @@ class AutonomousForagingController:
                 c=self.sensor.read();actions=self._open_actions(c)
                 if len(actions)>=2:
                     if not self._select_at_decision_point(c):
-                        if self.memory.junctions:self._backtrack()
-                        else:self.previous_snapshot=self.sensor.read()
+                        self._recover_exploration_dead_end()
                 elif len(actions)==1 and actions[0]!='MOVE_FORWARD':self._execute_turn(actions[0],record=True,source='FORCED_CORNER')
-                elif len(actions)==0:self._backtrack()
+                elif len(actions)==0:self._recover_exploration_dead_end()
                 self.previous_snapshot=self.sensor.read();energy=self._sample_energy('EXPLORE');continue
             front_blocked=s.front_m<=self.config.wall_stop_distance_m+self.config.endpoint_tolerance_m
             if front_blocked:
                 e=self._sample_energy('AT_ENDPOINT')
                 if e.detected:energy=e;break
                 actions=self._open_actions(s)
-                if len(actions)==0:self._backtrack()
+                if len(actions)==0:self._recover_exploration_dead_end()
                 elif len(actions)==1 and actions[0]!='MOVE_FORWARD':self._execute_turn(actions[0],record=True,source='FORCED_CORNER')
                 elif len(actions)>=2:
                     if not self._select_at_decision_point(s):
-                        if self.memory.junctions:self._backtrack()
-                        else:self.previous_snapshot=self.sensor.read()
+                        self._recover_exploration_dead_end()
             else:
                 safe=min(self.config.movement_step_m,max(0.0,s.front_m-self.config.wall_stop_distance_m))
-                if safe<=self.config.minimum_progress_m:self._backtrack()
+                if safe<=self.config.minimum_progress_m:self._recover_exploration_dead_end()
                 else:
                     _,stuck=self._move(safe,record=True,source='EXPLORE_CORRIDOR',phase='EXPLORE')
                     if stuck:
@@ -1181,8 +1609,12 @@ class AutonomousForagingController:
                         # that current-trip decision point and let the
                         # existing win-shift policy select another branch.
                         # This deliberately does not add a map or a planner.
-                        if self.memory.junctions:
+                        if self._working_memory_active and self.memory.junctions:
                             self._backtrack()
+                            energy=self._sample_energy('EXPLORE')
+                            continue
+                        if not self._working_memory_active:
+                            self._recover_exploration_dead_end()
                             energy=self._sample_energy('EXPLORE')
                             continue
                         raise RuntimeError(
@@ -1193,7 +1625,13 @@ class AutonomousForagingController:
         found=self.motion.backend.read_pose()
         if self.hud is not None:self.hud.collect_energy();self.hud.update(last_action='CARRY',working_memory_route=self.memory.route_string or '-')
         self.motion.stop(0.5)
-        outbound=self.total_distance_m;error=self._return_home(home);reached=error<=self.config.home_tolerance_m
+        outbound = self.total_distance_m
+        error = (
+            self._return_home(home)
+            if self._working_memory_active
+            else self._return_home_baseline(home)
+        )
+        reached = error <= self.config.home_tolerance_m
         result={"status":"PASS" if reached else "FAIL","experiment_mode":self.experiment_mode.mode.value,
             "memory_enabled":self.config.memory_enabled,"exchange_enabled":self.experiment_mode.exchange_enabled,
             "exchange_type":self.experiment_mode.exchange_type.value,"hormone_enabled":self.experiment_mode.hormone_enabled,
@@ -1207,6 +1645,17 @@ class AutonomousForagingController:
             "experience_decision_fallback_count":(
                 self.experience_decision_fallback_count
             ),
+            "light_first_valid_distance_m": self.light_first_valid_distance_m,
+            "light_approach_min_distance_m": self.light_approach_min_distance_m,
+            "light_approach_abort_count": self.light_approach_abort_count,
+            "light_approach_abort_reasons": dict(
+                self.light_approach_abort_reasons
+            ),
+            "light_first_valid_to_collect_s": (
+                None
+                if self.light_first_valid_time_s is None
+                else self.motion.backend.time_s - self.light_first_valid_time_s
+            ),
             "navigation_model":(
                 "RAT_INSPIRED_DECISION_MEMORY_"
                 "NO_WORLD_MAP"
@@ -1217,7 +1666,10 @@ class AutonomousForagingController:
             "working_memory_loop_erasures":self.memory.loop_erasures,
             "working_memory_pruned_breadcrumbs":self.memory.pruned_breadcrumbs,
             "working_memory_pruned_decisions":self.memory.pruned_decisions,
-            "return_navigation":"PRUNED_BREADCRUMB_WITH_TOF_SHORTCUT",
+            "return_navigation":(
+                "CURRENT_TRIP_WORKING_MEMORY_BREADCRUMBS"
+                if self._working_memory_active else "STATELESS_HOME_VECTOR"
+            ),
             "found_pose":{"x_m":found.x_m,"y_m":found.y_m,"theta_rad":found.theta_rad},
             "home_position_error_m":error,"home_position_tolerance_m":self.config.home_tolerance_m,"home_reached":reached,
             "outbound_distance_m":outbound,"total_actual_distance_m":self.total_distance_m}
@@ -1229,8 +1681,17 @@ class AutonomousForagingController:
         self.previous_snapshot=None;self.pending_redecision=False;self.latest_energy_reading=None
         self.light_turn_locked=False
         self.light_progress_since_turn_m=0.0
+        self.light_approach_active=False
+        self.light_reentry_distance_remaining_m=0.0
+        self.light_first_valid_distance_m=None
+        self.light_first_valid_time_s=None
+        self.light_approach_start_time_s=None
+        self.light_approach_min_distance_m=None
+        self.light_approach_abort_count=0
+        self.light_approach_abort_reasons={}
         self.experience_decision_recall_count=0
         self.experience_decision_fallback_count=0
+        self.rejected_decision_ports.clear()
         self.trip_decision_ordinal=0
         self.current_trip_id=int(trip_id)
         self.experience.start_trip(trip_id)
@@ -1243,14 +1704,14 @@ class AutonomousForagingController:
 
     def _append_summary(self,trip_id:int,result:dict,start:float,nest:int)->None:
         path=self.trace.run_dir/'trip_summary.csv';header=not path.exists()
-        fields=['trip_id','status','endpoint_id','simulation_start_s','simulation_end_s','trip_duration_s','trip_distance_m','home_reached','home_error_m','working_memory_commands','decision_points','world_map_created','nest_energy_after_trip']
+        fields=['trip_id','status','endpoint_id','simulation_start_s','simulation_end_s','trip_duration_s','trip_distance_m','outbound_distance_m','return_distance_m','home_reached','home_error_m','working_memory_commands','decision_points','experience_recalls','experience_fallbacks','world_map_created','nest_energy_after_trip']
         with path.open('a',newline='',encoding='utf-8') as f:
             w=csv.DictWriter(f,fieldnames=fields)
             if header:w.writeheader()
             w.writerow({'trip_id':trip_id,'status':result['status'],'endpoint_id':result['detected_endpoint_id'],'simulation_start_s':start,
-                'simulation_end_s':self.motion.backend.time_s,'trip_duration_s':self.motion.backend.time_s-start,'trip_distance_m':result['total_actual_distance_m'],
+                'simulation_end_s':self.motion.backend.time_s,'trip_duration_s':self.motion.backend.time_s-start,'trip_distance_m':result['total_actual_distance_m'],'outbound_distance_m':result['outbound_distance_m'],'return_distance_m':result['total_actual_distance_m']-result['outbound_distance_m'],
                 'home_reached':result['home_reached'],'home_error_m':result['home_position_error_m'],'working_memory_commands':result['working_memory_command_count'],
-                'decision_points':result['decision_point_count'],'world_map_created':False,'nest_energy_after_trip':nest})
+                'decision_points':result['decision_point_count'],'experience_recalls':result['experience_decision_recall_count'],'experience_fallbacks':result['experience_decision_fallback_count'],'world_map_created':False,'nest_energy_after_trip':nest})
 
     def run(self)->dict:
         results=[];nest=0;start_all=self.motion.backend.time_s
@@ -1266,10 +1727,15 @@ class AutonomousForagingController:
                     energy_y_m=endpoint.y_m,
                     nest_energy_units=nest,
                 )
-            result=self._run_single_trip();result['trip_id']=trip_id
+            try:
+                result=self._run_single_trip();result['trip_id']=trip_id
+            except Exception as exc:
+                if self.config.route_experience_enabled:
+                    self.experience.record_failure(source_id=self.energy_sensor.active_endpoint.endpoint_id,trip_id=trip_id,reason=f'{type(exc).__name__}: {exc}')
+                raise
             if result['home_reached']:
                 nest+=1
-                if self.config.memory_enabled:
+                if self.config.route_experience_enabled:
                     result['experience_update']=self.experience.commit_success(source_id=result['detected_endpoint_id'],working_memory=self.memory,
                         outbound_distance_m=result['outbound_distance_m'],total_trip_distance_m=result['total_actual_distance_m'],trip_id=trip_id)
             result['nest_energy_after_trip']=nest;results.append(result);self._save_trip(trip_id,result);self._append_summary(trip_id,result,start,nest)

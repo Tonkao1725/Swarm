@@ -155,6 +155,14 @@ class RandomEndpointEnergySensor:
     def active_endpoint(self) -> EnergyEndpoint:
         return self._active
 
+    def activate_endpoint(self, endpoint_id: str) -> EnergyEndpoint:
+        """Switch the active resource for a controlled relocation experiment."""
+        for endpoint in self._endpoints:
+            if endpoint.endpoint_id == endpoint_id:
+                self._active = endpoint
+                return endpoint
+        raise ValueError(f"Unknown energy endpoint: {endpoint_id}")
+
     def select_next_endpoint(
         self,
         *,

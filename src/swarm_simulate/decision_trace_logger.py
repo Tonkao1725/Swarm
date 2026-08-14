@@ -28,7 +28,7 @@ class ForagingTraceLogger:
         self._energy_file = (run_dir / "energy.csv").open(
             "w", newline="", encoding="utf-8"
         )
-        self._return_file = (run_dir / "return_replay.csv").open(
+        self._return_file = (run_dir / "return_navigation.csv").open(
             "w", newline="", encoding="utf-8"
         )
         self._recovery_file = (run_dir / "collision_recovery.csv").open(

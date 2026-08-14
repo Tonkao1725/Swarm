@@ -63,12 +63,6 @@ class WorkingMemory:
     counts. It does not build a global map or connect decision points by edges.
     """
 
-    INVERSE_TURN = {
-        "TURN_LEFT": "TURN_RIGHT",
-        "TURN_RIGHT": "TURN_LEFT",
-        "TURN_BACK": "TURN_BACK",
-    }
-
     def __init__(
         self,
         *,
@@ -214,20 +208,19 @@ class WorkingMemory:
             removed_breadcrumbs = (
                 len(self.breadcrumbs) - closure - 1
             )
-            old_path_count = len(self.path)
-            old_junction_count = len(self.junctions)
-
             del self.breadcrumbs[closure + 1 :]
+            previous_path_count = len(self.path)
+            previous_junction_count = len(self.junctions)
             self.truncate_path(candidate.path_index)
             del self.junctions[candidate.junction_count :]
 
             self.loop_erasures += 1
             self.pruned_breadcrumbs += removed_breadcrumbs
             self.pruned_path_commands += (
-                old_path_count - len(self.path)
+                previous_path_count - len(self.path)
             )
             self.pruned_decisions += (
-                old_junction_count - len(self.junctions)
+                previous_junction_count - len(self.junctions)
             )
             pruned = True
 
@@ -317,15 +310,6 @@ class WorkingMemory:
             raise ValueError("Invalid Working Memory path index")
         del self.path[index:]
 
-    def return_commands(self) -> list[PathCommand]:
-        result=[]
-        for item in reversed(self.path):
-            if item.command == "MOVE_FORWARD":
-                result.append(PathCommand("MOVE_FORWARD", item.value, "RETURN_REPLAY"))
-            else:
-                result.append(PathCommand(self.INVERSE_TURN[item.command], item.value, "RETURN_REPLAY"))
-        return result
-
     @property
     def route_string(self) -> str:
         symbol={"TURN_LEFT":"L","TURN_RIGHT":"R","TURN_BACK":"B","MOVE_FORWARD":"F"}
@@ -353,7 +337,6 @@ class WorkingMemory:
             "pruned_breadcrumbs":self.pruned_breadcrumbs,
             "pruned_path_commands":self.pruned_path_commands,
             "pruned_decisions":self.pruned_decisions,
-            "return_commands":[asdict(item) for item in self.return_commands()],
         }
 
     def save(self, path: Path) -> None:

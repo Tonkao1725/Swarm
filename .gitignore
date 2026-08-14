@@ -8,6 +8,7 @@ __pycache__/
 
 # Simulation output, diagnostics, and generated reports
 results/
+batch_results/
 *.log
 *.log.err
 *_TEST_REPORT.json

@@ -226,6 +226,18 @@ class ExperienceMemory:
         self.update_history.append(update)
         return update
 
+    def record_failure(self, *, source_id: str, trip_id: int, reason: str) -> dict[str, Any]:
+        """Temporarily reduce stale route confidence; never blacklist it."""
+        route = self.routes.get(source_id)
+        if route is not None:
+            route.failure_count += 1
+            route.confidence = max(0.10, route.confidence - 0.20)
+        update = {"trip_id": int(trip_id), "source_id": source_id,
+                  "success": False, "reason": str(reason),
+                  "confidence": route.confidence if route is not None else 0.0}
+        self.update_history.append(update)
+        return update
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "memory_type": "EXPERIENCE_MEMORY",
@@ -259,6 +271,7 @@ class ExperienceMemory:
             "trip_id",
             "source_id",
             "success",
+            "reason",
             "route_replaced",
             "candidate_outbound_distance_m",
             "best_outbound_distance_m",

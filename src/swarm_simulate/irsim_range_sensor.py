@@ -31,6 +31,7 @@ class IRSimDirectionalRangeSensor:
         self,
         env,
         range_max_m: float,
+        robot_id: int = 0,
         minimum_beam_count: int = 90,
         maximum_direction_error_deg: float = 2.0,
     ) -> None:
@@ -45,6 +46,7 @@ class IRSimDirectionalRangeSensor:
 
         self.env = env
         self.range_max_m = range_max_m
+        self.robot_id = int(robot_id)
         self.minimum_beam_count = minimum_beam_count
 
         # IR-SIM marks hits closer than the configured LiDAR range_min as
@@ -63,7 +65,7 @@ class IRSimDirectionalRangeSensor:
 
     def _pose(self) -> RobotPose:
         values = np.asarray(
-            self.env.get_robot_state(),
+            self.env.robot_list[self.robot_id]._state,
             dtype=float,
         ).reshape(-1)
         if values.size < 3:
@@ -129,7 +131,7 @@ class IRSimDirectionalRangeSensor:
     def _clean_scan(
         self,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        scan = self.env.get_lidar_scan()
+        scan = self.env.get_lidar_scan(id=self.robot_id)
         if not isinstance(scan, dict):
             raise RuntimeError(
                 "IR-SIM get_lidar_scan() did not return a dictionary."

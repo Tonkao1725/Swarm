@@ -31,6 +31,7 @@ class RunLogger:
         self.run_dir = base / safe_run_id
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.env, self.status = env, 'RUNNING'
+        self.summary_extra: dict[str, Any] = {}
         self.step_count = self.command_count = self.wheel_limit_count = 0
         self.total_distance_m = 0.0
         self.max_odom_position_error_m = self.max_odom_heading_error_deg = 0.0
@@ -100,12 +101,24 @@ class RunLogger:
         except Exception as exc: self.log_event('FIGURE_SAVE_FAILED',f'{type(exc).__name__}: {exc}')
 
     def mark_success(self): self.status='SUCCESS'; self.log_event('RUN_COMPLETE','Simulation completed normally.')
+    def mark_completed(self, *, mission_outcome: str, experimental_validity: str):
+        """Record a completed experiment without equating it to mission success."""
+        self.status = 'COMPLETED'
+        self.summary_extra = {
+            'engineering_status': 'COMPLETED',
+            'mission_outcome': str(mission_outcome),
+            'experimental_validity': str(experimental_validity),
+        }
+        self.log_event(
+            'RUN_COMPLETE',
+            f"engineering=COMPLETED; mission={mission_outcome}; validity={experimental_validity}",
+        )
     def mark_failure(self,exc):
         self.status='FAILED'; (self.run_dir/'error_traceback.txt').write_text(''.join(traceback.format_exception(type(exc),exc,exc.__traceback__)),encoding='utf-8'); self.log_event('RUN_FAILED',f'{type(exc).__name__}: {exc}')
 
     def close(self):
         truth=RobotPose(*self.last_state); est=self.final_estimated_pose
-        self._write_json('summary.json',{
+        summary = {
             'status':self.status,'steps':self.step_count,'commands':self.command_count,'simulation_time_s':round(float(self.env.time),6),'total_ground_truth_distance_m':round(self.total_distance_m,10),'wheel_speed_limit_steps':self.wheel_limit_count,
             'ground_truth_start_pose':{'x_m':self.start_state[0],'y_m':self.start_state[1],'theta_rad':self.start_state[2]},
             'ground_truth_final_pose':{'x_m':truth.x_m,'y_m':truth.y_m,'theta_rad':truth.theta_rad},
@@ -115,7 +128,9 @@ class RunLogger:
             'final_odometry_position_error_m':round(math.hypot(est.x_m-truth.x_m,est.y_m-truth.y_m),10),
             'final_odometry_heading_error_deg':round(math.degrees(self._angle_error(est.theta_rad,truth.theta_rad)),8),
             'max_odometry_position_error_m':round(self.max_odom_position_error_m,10),'max_odometry_heading_error_deg':round(self.max_odom_heading_error_deg,8),
-        })
+        }
+        summary.update(self.summary_extra)
+        self._write_json('summary.json', summary)
         for f in self._files.values(): f.close()
 
     def _write_json(self,name,data): (self.run_dir/name).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
