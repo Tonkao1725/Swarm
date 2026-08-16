@@ -96,6 +96,13 @@ def main() -> int:
         )
     scout_count = int(os.environ.get("SWARM_SCOUT_COUNT", "1"))
     swarm_duration_s = float(os.environ.get("SWARM_SIM_DURATION_S", "300"))
+    swarm_mission_mode = os.environ.get("SWARM_MISSION_MODE", "trip_limited").strip().lower()
+    nest_energy_target_raw = os.environ.get("NEST_ENERGY_TARGET", "").strip()
+    nest_energy_target = int(nest_energy_target_raw) if nest_energy_target_raw else None
+    if swarm_mission_mode not in {"research", "trip_limited"}:
+        raise ValueError("SWARM_MISSION_MODE must be 'research' or 'trip_limited'")
+    if swarm_mission_mode == "research" and (nest_energy_target is None or nest_energy_target < 1):
+        raise ValueError("Research mission mode requires NEST_ENERGY_TARGET >= 1")
     if scout_count < 1 or scout_count > 4:
         raise ValueError("SWARM_SCOUT_COUNT must be between 1 and 4")
     if swarm_duration_s <= 0.0:
@@ -437,7 +444,8 @@ def main() -> int:
                 env=env, run_dir=logger.run_dir, energy_sensor=energy_sensor,
                 seed=seed, scout_count=scout_count,
                 duration_s=swarm_duration_s, trip_count=trip_count,
-                render_enabled=render_enabled,
+                render_enabled=render_enabled, mission_mode=swarm_mission_mode,
+                nest_energy_target=nest_energy_target,
             ).run()
             logger.log_event(
                 "SWARM_BASELINE_COMPLETE",

@@ -17,6 +17,7 @@ import random
 from typing import Any
 
 import numpy as np
+from matplotlib.patches import Circle
 
 from energy_sensor import RandomEndpointEnergySensor
 from irsim_range_sensor import IRSimDirectionalRangeSensor
@@ -34,6 +35,7 @@ class ScoutState:
     home: RobotPose
     phase: str = "EXPLORE"
     trip_id: int = 1
+    started_trip_count: int = 1
     turn_remaining_rad: float = 0.0
     turn_reason: str = ""
     # This is actuator state for one current obstacle-escape maneuver only.
@@ -65,6 +67,7 @@ class ScoutState:
     # never used to identify a place, obstacle, or route.
     recovery_translation_m: float = 0.0
     recovery_rotation_rad: float = 0.0
+    recovery_failure_detail: str = ""
     recovery_departure_steps: int = 0
     resource_departure_steps: int = 0
     # Current obstacle-bypass maneuver only. Cleared as soon as a fresh scan
@@ -87,7 +90,8 @@ class BaselineSwarmRunner:
     def __init__(
         self, *, env, run_dir: Path, energy_sensor: RandomEndpointEnergySensor,
         seed: int, scout_count: int, duration_s: float, trip_count: int,
-        render_enabled: bool,
+        render_enabled: bool, mission_mode: str = "trip_limited",
+        nest_energy_target: int | None = None,
     ) -> None:
         if scout_count < 2:
             raise ValueError("Baseline swarm requires at least two Scouts")
@@ -100,6 +104,14 @@ class BaselineSwarmRunner:
         self.scout_count = int(scout_count)
         self.duration_s = float(duration_s)
         self.trip_count = int(trip_count)
+        self.mission_mode = str(mission_mode)
+        self.nest_energy_target = nest_energy_target
+        if self.mission_mode not in {"research", "trip_limited"}:
+            raise ValueError("mission_mode must be 'research' or 'trip_limited'")
+        if self.mission_mode == "research" and (
+            self.nest_energy_target is None or self.nest_energy_target < 1
+        ):
+            raise ValueError("Research mission mode requires NEST_ENERGY_TARGET >= 1")
         self.render_enabled = bool(render_enabled)
         self.safe_front_m = 0.72
         # A 0.25 m radius body needs lateral room to rotate at a wall corner.
@@ -126,6 +138,9 @@ class BaselineSwarmRunner:
         # learned information. Delivery makes the controlled source available
         # again for a later independent trip.
         self.resource_carrier_id: int | None = None
+        # Display-only marker for visual replay.  It has no IR-SIM body and
+        # never participates in collision, sensing, or controller state.
+        self._display_energy_marker = None
         self._add_scouts()
         self.sensors = [
             IRSimDirectionalRangeSensor(env=env, range_max_m=5.0, robot_id=i)
@@ -164,6 +179,25 @@ class BaselineSwarmRunner:
             ))
         if extras:
             self.env.add_objects(extras)
+
+    def _draw_energy_marker(self) -> None:
+        """Keep the fixed source visible in a rendered Baseline replay."""
+        if not self.render_enabled:
+            return
+        import matplotlib.pyplot as plt
+
+        figure = plt.gcf()
+        if not figure.axes:
+            return
+        axes = figure.axes[0]
+        if self._display_energy_marker is None:
+            self._display_energy_marker = Circle(
+                (self.energy_sensor.active_endpoint.x_m, self.energy_sensor.active_endpoint.y_m),
+                self.energy_sensor.visible_marker_radius_m,
+                facecolor="yellow", edgecolor="goldenrod", linewidth=1.5, zorder=100,
+            )
+        if self._display_energy_marker not in axes.patches:
+            axes.add_patch(self._display_energy_marker)
 
     @staticmethod
     def _pose(env, scout_id: int) -> RobotPose:
@@ -303,13 +337,15 @@ class BaselineSwarmRunner:
         turn from the newly sampled local clearances.  It contains no record
         of the obstacle, previous route, or previous decision once complete.
         """
-        # IR-SIM's ``collision_mode: stop`` latches ``stop_flag`` after an
-        # overlap and otherwise refuses *all* later velocity commands.  A
-        # bounded retreat would consequently never reach its kinematics.  The
-        # controller releases that latch only while executing this safety
-        # maneuver; collision validation remains active for the resulting
-        # pose, so a forward command cannot pass through a wall.
-        self.env.robot_list[scout.scout_id].stop_flag = False
+        # IR-SIM's ``collision_mode: stop`` retains the contact report and
+        # stop latch from the preceding overlap.  Clear both only while this
+        # bounded safety maneuver is being evaluated.  The next physics step
+        # still recomputes collision for the commanded pose and immediately
+        # reasserts either flag if the body remains in contact, so this never
+        # authorizes passage through a wall.
+        robot = self.env.robot_list[scout.scout_id]
+        robot.stop_flag = False
+        robot.collision_flag = False
         if scout.recovery_stage == "BACK_OFF":
             scout.recovery_steps_remaining -= 1
             if scout.recovery_steps_remaining <= 0:
@@ -342,7 +378,27 @@ class BaselineSwarmRunner:
             and not bool(robot.stop_flag)
         )
 
-    def _explore_command(self, scout: ScoutState, snapshot, reading) -> tuple[float, float, str]:
+    def _forward_body_clearance_safe(self, snapshot, sensor) -> bool:
+        """Require local clearance for the circular body, not only its nose.
+
+        The three cardinal ToF beams can miss the endpoint of a wall while a
+        circular robot clips that corner on the next forward tick.  Two fresh
+        +/-45 degree rays close that body-clearance gap.  This is a current
+        sensor gate only: it retains neither an obstacle location nor a past
+        choice.
+        """
+        if snapshot.front_m <= self.safe_front_m:
+            return False
+        corner_clearance = self.turn_side_clearance_m + (
+            self.linear_speed_mps * self.env.step_time
+        )
+        for offset in (-math.pi / 4.0, math.pi / 4.0):
+            ray, _, inside, valid = sensor.ray_distance(offset)
+            if inside and valid and ray <= corner_clearance:
+                return False
+        return True
+
+    def _explore_command(self, scout: ScoutState, snapshot, reading, sensor) -> tuple[float, float, str]:
         if scout.recovery_stage:
             return self._contact_recovery_command(scout, snapshot)
         if scout.recovery_departure_steps:
@@ -394,6 +450,11 @@ class BaselineSwarmRunner:
             direction = 1.0 if scout.rng.random() < 0.5 else -1.0
             self._start_turn(scout, direction, "EXPLORE_TURN_45")
             return self._continue_turn(scout)
+        if not self._forward_body_clearance_safe(snapshot, sensor):
+            scout.blocked_count += 1
+            return self._begin_clear_side_turn(
+                scout, snapshot, "OBSTACLE_ESCAPE_TURN_45"
+            )
         return self.linear_speed_mps, 0.0, "EXPLORE_FORWARD"
 
     def _return_command(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str]:
@@ -456,7 +517,7 @@ class BaselineSwarmRunner:
         snapshot = sensor.read()
         reading = self.energy_sensor.read(snapshot.pose, sensor)
         if scout.phase == "EXPLORE":
-            linear, angular, action = self._explore_command(scout, snapshot, reading)
+            linear, angular, action = self._explore_command(scout, snapshot, reading, sensor)
         elif scout.phase == "COLLECT":
             if self.resource_carrier_id is None:
                 self.resource_carrier_id = scout.scout_id
@@ -482,15 +543,21 @@ class BaselineSwarmRunner:
             scout.collected_at_s = None
             if self.resource_carrier_id == scout.scout_id:
                 self.resource_carrier_id = None
-            scout.phase = "COMPLETE" if scout.trip_id >= self.trip_count else "EXPLORE"
+            scout.phase = (
+                "COMPLETE"
+                if self.mission_mode == "trip_limited" and scout.trip_id >= self.trip_count
+                else "EXPLORE"
+            )
             scout.trip_id += 1
+            if scout.phase == "EXPLORE":
+                scout.started_trip_count += 1
             linear, angular, action = 0.0, 0.0, "DELIVER"
         else:
             linear, angular, action = 0.0, 0.0, "MISSION_COMPLETE"
         return linear, angular, action, reading
 
     @staticmethod
-    def _mission_outcome(scout: ScoutState) -> str:
+    def _behavioral_outcome(scout: ScoutState) -> str:
         if scout.phase == "RETURN_HOME":
             return "TIME_LIMIT_REACHED"
         if scout.delivery_count:
@@ -505,6 +572,9 @@ class BaselineSwarmRunner:
         trajectory = (self.run_dir / "swarm_trajectory.csv").open("w", newline="", encoding="utf-8")
         event_file = (self.run_dir / "swarm_events.csv").open("w", newline="", encoding="utf-8")
         trip_file = (self.run_dir / "swarm_trip_summary.csv").open("w", newline="", encoding="utf-8")
+        energy_timeline_file = (self.run_dir / "nest_energy_timeline.csv").open(
+            "w", newline="", encoding="utf-8"
+        )
         trajectory_writer = csv.DictWriter(trajectory, fieldnames=[
             "sim_time_s", "scout_id", "trip_id", "phase", "x_m", "y_m", "heading_deg", "action",
             "linear_velocity_mps", "angular_velocity_radps", "front_m", "left_m", "right_m", "solar_max",
@@ -512,7 +582,11 @@ class BaselineSwarmRunner:
         ])
         event_writer = csv.DictWriter(event_file, fieldnames=["sim_time_s", "scout_id", "trip_id", "event", "detail"])
         trip_writer = csv.DictWriter(trip_file, fieldnames=["scout_id", "trip_id", "outcome", "collection_s", "delivery_s", "trip_distance_m"])
-        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader()
+        energy_timeline_writer = csv.DictWriter(
+            energy_timeline_file,
+            fieldnames=["run_id", "seed", "timestamp", "scout_id", "previous_energy", "delivered_energy", "new_energy", "target"],
+        )
+        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader(); energy_timeline_writer.writeheader()
         coverage: dict[int, set[tuple[int, int]]] = {i: set() for i in range(self.scout_count)}
         for scout in self.scouts:
             scout.previous_pose = self._pose(self.env, scout.scout_id)
@@ -521,6 +595,9 @@ class BaselineSwarmRunner:
                                    "event": "SCOUT_START", "detail": "independent local-reactive baseline"})
 
         maximum_steps = int(math.ceil(self.duration_s / self.env.step_time))
+        mission_complete = False
+        target_reached_time_s: float | None = None
+        termination_reason = "EXPERIMENT_HORIZON_REACHED"
         for step in range(maximum_steps):
             commands, rows = [], []
             for scout, sensor in zip(self.scouts, self.sensors, strict=True):
@@ -548,6 +625,12 @@ class BaselineSwarmRunner:
                         scout.recovery_stage = ""
                         scout.contact_stall_steps = 0
                         scout.recovery_departure_steps = self.bypass_departure_step_count
+                        # The recovery back-off itself has travelled the
+                        # body-safe clearance.  It has therefore left the
+                        # original contact geometry; a later physical contact
+                        # is a genuinely new bounded safety episode.
+                        if scout.recovery_translation_m >= self.safe_front_m:
+                            scout.contact_recovery_episode_count = 0
                         action = "CONTACT_RECOVERY_COMPLETE"
                     else:
                         # This recovery episode itself failed to move the body
@@ -555,6 +638,15 @@ class BaselineSwarmRunner:
                         # controller/physics failure, unlike a later and
                         # separate contact after a proven departure.
                         scout.recovery_stage = ""
+                        robot = self.env.robot_list[scout.scout_id]
+                        scout.recovery_failure_detail = (
+                            "translation_m="
+                            f"{scout.recovery_translation_m:.6f}; "
+                            "rotation_rad="
+                            f"{scout.recovery_rotation_rad:.6f}; "
+                            f"collision={bool(robot.collision)}; "
+                            f"stop_flag={bool(robot.stop_flag)}"
+                        )
                         scout.contact_stalled = True
                         scout.phase = "CONTACT_STALLED"
                         contact_stall_started = True
@@ -574,11 +666,6 @@ class BaselineSwarmRunner:
                     scout.contact_stall_steps += 1
                 else:
                     scout.contact_stall_steps = 0
-                # A measured forward/reverse displacement after recovery
-                # closes that physical contact episode.  This is safety-state
-                # bookkeeping only, never route or obstacle memory.
-                if moved >= 0.01 and not scout.recovery_stage:
-                    scout.contact_recovery_episode_count = 0
                 if (
                     scout.contact_stall_steps >= 3
                     and scout.phase not in {"COMPLETE", "CONTACT_STALLED"}
@@ -588,7 +675,11 @@ class BaselineSwarmRunner:
                         scout.contact_recovery_count += 1
                         scout.contact_stall_steps = 0
                         scout.recovery_stage = "BACK_OFF"
-                        scout.recovery_steps_remaining = 8
+                        # Retreat by the already defined body-safe clearance
+                        # before reorienting.  Eight 0.1 s ticks (0.176 m)
+                        # could leave the circular body inside the same corner
+                        # even when all three directional beams looked clear.
+                        scout.recovery_steps_remaining = self.bypass_departure_step_count
                         scout.recovery_translation_m = 0.0
                         scout.recovery_rotation_rad = 0.0
                         action = "CONTACT_RECOVERY_START"
@@ -602,7 +693,7 @@ class BaselineSwarmRunner:
                 coverage[scout.scout_id].add((math.floor(pose.x_m / 0.5), math.floor(pose.y_m / 0.5)))
                 trajectory_writer.writerow({
                     "sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                    "trip_id": min(scout.trip_id, self.trip_count), "phase": scout.phase,
+                    "trip_id": (scout.trip_id if self.mission_mode == "research" else min(scout.trip_id, self.trip_count)), "phase": scout.phase,
                     "x_m": pose.x_m, "y_m": pose.y_m, "heading_deg": math.degrees(pose.theta_rad),
                     "action": action, "linear_velocity_mps": linear, "angular_velocity_radps": angular,
                     "front_m": snapshot.front_m, "left_m": snapshot.left_m, "right_m": snapshot.right_m,
@@ -630,13 +721,23 @@ class BaselineSwarmRunner:
                 elif action == "DELIVER":
                     delivered_trip_id = scout.trip_id - 1
                     nest_energy_after = sum(item.delivery_count for item in self.scouts)
+                    nest_energy_before = nest_energy_after - 1
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": delivered_trip_id, "event": "DELIVER",
                                            "detail": (
-                                               f"nest_energy_before={nest_energy_after - 1}; "
+                                               f"nest_energy_before={nest_energy_before}; "
                                                f"nest_energy_after={nest_energy_after}; "
                                                "resource_carrier_released=true"
                                            )})
+                    event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                           "trip_id": delivered_trip_id, "event": "NEST_ENERGY_UPDATED",
+                                           "detail": f"previous_energy={nest_energy_before}; delivered_energy=1; new_energy={nest_energy_after}; target={self.nest_energy_target}"})
+                    energy_timeline_writer.writerow({
+                        "run_id": self.run_dir.name, "seed": self.seed,
+                        "timestamp": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                        "previous_energy": nest_energy_before, "delivered_energy": 1,
+                        "new_energy": nest_energy_after, "target": self.nest_energy_target,
+                    })
                     if scout.phase == "EXPLORE":
                         event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                                "trip_id": scout.trip_id, "event": "NEXT_TRIP_START",
@@ -648,20 +749,36 @@ class BaselineSwarmRunner:
                 if contact_stall_started:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "CONTACT_STALLED",
-                                           "detail": "three commanded steps produced no translation or rotation"})
+                                           "detail": scout.recovery_failure_detail or "three commanded steps produced no translation or rotation"})
                 elif action == "CONTACT_RECOVERY_START":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "CONTACT_RECOVERY_START",
                                            "detail": "bounded back-off and fresh-LiDAR reorientation"})
             if self.render_enabled and step % 3 == 0:
                 self.env.render()
-            if all(s.phase == "COMPLETE" for s in self.scouts):
+                self._draw_energy_marker()
+            delivered_this_tick = sum(s.delivery_count for s in self.scouts)
+            if self.mission_mode == "research" and delivered_this_tick >= self.nest_energy_target:
+                mission_complete = True
+                target_reached_time_s = round(float(self.env.time), 6)
+                termination_reason = "NEST_ENERGY_TARGET_REACHED"
+                event_writer.writerow({"sim_time_s": target_reached_time_s, "scout_id": "COLONY",
+                                       "trip_id": "", "event": "MISSION_COMPLETE",
+                                       "detail": f"nest_energy={delivered_this_tick}; target={self.nest_energy_target}; termination_reason=NEST_ENERGY_TARGET_REACHED"})
+                break
+            if self.mission_mode == "trip_limited" and all(s.phase == "COMPLETE" for s in self.scouts):
+                mission_complete = True
+                termination_reason = "TRIP_LIMIT_REACHED"
                 break
 
+        if self.mission_mode == "research" and not mission_complete:
+            event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": "COLONY",
+                                   "trip_id": "", "event": "EXPERIMENT_TERMINATED",
+                                   "detail": f"reason=EXPERIMENT_HORIZON_REACHED; nest_energy={sum(s.delivery_count for s in self.scouts)}; target={self.nest_energy_target}"})
         for scout in self.scouts:
             for row in scout.trip_rows:
                 trip_writer.writerow({"scout_id": scout.scout_id, **row})
-        trajectory.close(); event_file.close(); trip_file.close()
+        trajectory.close(); event_file.close(); trip_file.close(); energy_timeline_file.close()
 
         delivered = sum(s.delivery_count for s in self.scouts)
         all_complete = all(s.phase == "COMPLETE" for s in self.scouts)
@@ -669,10 +786,16 @@ class BaselineSwarmRunner:
         has_return_arbitration_pathology = any(
             s.return_arbitration_pathology for s in self.scouts
         )
+        if self.mission_mode == "research" and not mission_complete:
+            termination_reason = "EXPERIMENT_HORIZON_REACHED"
         result = {
             "status": "COMPLETED",
             "engineering_status": "COMPLETED",
-            "mission_outcome": "SUCCESS" if all_complete else ("NO_SUCCESSFUL_DELIVERY" if delivered == 0 else "TIME_LIMIT_REACHED"),
+            "mission_outcome": (
+                "MISSION_SUCCESS" if self.mission_mode == "research" and mission_complete
+                else "TIME_LIMIT_REACHED" if self.mission_mode == "research"
+                else "SUCCESS" if all_complete else ("NO_SUCCESSFUL_DELIVERY" if delivered == 0 else "TIME_LIMIT_REACHED")
+            ),
             # Resource-not-found and a time horizon are legitimate baseline
             # outcomes.  A controller contact stall is not: it must remain
             # visibly invalid until the engineering defect is removed.
@@ -684,6 +807,11 @@ class BaselineSwarmRunner:
             "experiment": "CONDITION_1_BASELINE_MULTI_SCOUT_LOCAL_REACTIVE",
             "scout_count": self.scout_count, "requested_trips_per_scout": self.trip_count,
             "simulation_time_s": round(float(self.env.time), 6), "nest_energy_units": delivered,
+            "nest_energy_target": self.nest_energy_target,
+            "target_reached": mission_complete if self.mission_mode == "research" else None,
+            "target_reached_time_s": target_reached_time_s,
+            "termination_reason": termination_reason,
+            "mission_mode": self.mission_mode,
             "working_memory_enabled": False, "experience_memory_enabled": False,
             "hormone_enabled": False, "exchange_enabled": False, "shared_map_created": False,
             "return_navigation": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
@@ -697,8 +825,8 @@ class BaselineSwarmRunner:
                 "cross_trip_preference": False, "message_bus": False, "global_planner": False,
             },
             "scouts": [{
-                "scout_id": s.scout_id, "phase_at_horizon": s.phase, "completed_trips": s.delivery_count,
-                "mission_outcome": self._mission_outcome(s), "resource_found_count": s.resource_found_count,
+                "scout_id": s.scout_id, "phase_at_termination": s.phase, "completed_trip_count": s.delivery_count, "started_trip_count": s.started_trip_count,
+                "behavioral_outcome": self._behavioral_outcome(s), "resource_found_count": s.resource_found_count,
                 "collection_count": s.collection_count, "delivery_count": s.delivery_count,
                 "distance_m": s.distance_m, "coverage_cells_0_5m": len(coverage[s.scout_id]),
                 "diagonal_turn_count": s.diagonal_turn_count,

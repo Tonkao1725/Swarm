@@ -1,0 +1,14 @@
+{
+  "schema_version": "common-research-metrics-v2",
+  "coverage": {"unit": "scout-run", "formula": "count of unique (floor(x_m/0.5), floor(y_m/0.5)) trajectory cells", "source": "swarm_trajectory.csv", "inclusion": "all trajectory rows while the Scout is active"},
+  "outcome_funnel": {"unit": "scout-trip", "source": "swarm_events.csv", "stages": ["RESOURCE_DETECTED", "COLLECT", "RETURN_HOME_START", "NEST_REACHED", "DELIVER"], "inclusion": "valid event sequence; colony mission outcome is separate"},
+  "return_progress": {"unit": "return episode", "source": ["RETURN_HOME_START event", "swarm_trajectory.csv", "NEST_REACHED", "DELIVER"], "formula": "start/minimum/final Euclidean distance to the Scout home pose"},
+  "nest_energy": {"unit": "colony-run", "source": "nest_energy_timeline.csv", "formula": "cumulative delivered_energy; target is reached when energy >= target"},
+  "delivery_rate": {"unit": "colony-run", "formula": "1000 * deliveries / actual_runtime_s", "source": ["swarm_summary.json", "swarm_events.csv"]},
+  "coverage_rate": {"unit": "scout-run", "formula": "60 * coverage_cells / active_time_s", "source": "swarm_trajectory.csv"},
+  "distance_rate": {"unit": "scout-run", "formula": "60 * total_distance_m / active_time_s", "source": "swarm_summary.json"},
+  "revisit": {"unit": "scout-run", "formula": "trajectory samples whose canonical 0.5 m cell was previously observed by that Scout", "source": "swarm_trajectory.csv", "role": "passive only"},
+  "repeated_decision": {"unit": "scout-run", "formula": "consecutive equal action labels within the same canonical 0.5 m cell", "source": "swarm_trajectory.csv", "role": "passive only"},
+  "local_cycle_episode": {"unit": "scout-run", "formula": "maximal >=30 s interval with revisits and net displacement <=0.5 m", "source": "swarm_trajectory.csv", "role": "passive only"},
+  "mechanism_compatibility": {"baseline_values": {"wm_enabled": false, "wm_hit_count": 0, "wm_intervention_count": 0, "em_enabled": false, "em_query_count": 0, "em_used_count": 0, "exchange_mode": "off", "encounter_count": 0, "exchange_count": 0, "received_experience_count": 0, "used_received_experience_count": 0, "aih_enabled": false, "hormone_level": null, "hormone_update_count": 0, "hormone_influenced_decision_count": 0}}
+}
