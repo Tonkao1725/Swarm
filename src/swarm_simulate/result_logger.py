@@ -30,7 +30,7 @@ class RunLogger:
             safe_run_id = f'run_{stamp}'
         self.run_dir = base / safe_run_id
         self.run_dir.mkdir(parents=True, exist_ok=False)
-        self.env, self.status = env, 'RUNNING'
+        self.env, self.status, self.config = env, 'RUNNING', config
         self.summary_extra: dict[str, Any] = {}
         self.step_count = self.command_count = self.wheel_limit_count = 0
         self.total_distance_m = 0.0
@@ -130,6 +130,20 @@ class RunLogger:
             'max_odometry_position_error_m':round(self.max_odom_position_error_m,10),'max_odometry_heading_error_deg':round(self.max_odom_heading_error_deg,8),
         }
         summary.update(self.summary_extra)
+        configuration = self.config.get('configuration', self.config)
+        if configuration.get('canonical_summary_file') == 'swarm_summary.json':
+            # This logger owns legacy single-robot counters only.  Preserve the
+            # file for compatibility, but make its non-applicability explicit
+            # rather than emitting fabricated multi-Scout values.
+            summary.update({
+                'applicability': 'NOT_APPLICABLE',
+                'logger_scope': 'LEGACY_SINGLE_ROBOT_LOGGER',
+                'canonical_summary_file': 'swarm_summary.json',
+                'canonical_summary_reason': (
+                    'Multi-Scout research metrics are recorded by the '
+                    'BaselineSwarmRunner in swarm_summary.json.'
+                ),
+            })
         self._write_json('summary.json', summary)
         for f in self._files.values(): f.close()
 

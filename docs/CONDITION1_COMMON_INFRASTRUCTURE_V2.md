@@ -46,6 +46,23 @@ Passive revisit/repetition diagnostics are calculated only after a run from
 trajectory and action history. They never feed the controller, RNG, state
 machine, sensor readings, physics, or actuation.
 
+## Canonical result and episode records
+
+`swarm_summary.json` is the canonical research summary for a multi-Scout
+run. The compatibility `summary.json` belongs to the legacy single-robot
+logger and is explicitly labelled `NOT_APPLICABLE` for these runs; its zero
+single-robot counters must not be interpreted as Swarm results.
+
+`foraging_episode_summary.csv` is reconstructed passively from the event and
+trajectory logs. It contains every started Scout trip, including trips still
+exploring, carrying, or returning at the global horizon. A row is marked
+`DELIVERED` only for a `DELIVER` event; otherwise its horizon status records
+the furthest observed lifecycle state without inferring a controller event.
+
+`return_episode_summary.csv` is likewise reconstructed for every
+`RETURN_HOME_START`, including unfinished returns. Start, minimum, and final
+distances are analysis outputs only and never alter a Scout's local action.
+
 ## Metric hierarchy
 
 Primary colony metrics: mission outcome, time to target, Nest Energy versus

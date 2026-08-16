@@ -186,7 +186,16 @@ def main() -> int:
     )
 
     run_config = {
-        "test_name": "five_mode_collective_foraging_v1",
+        "test_name": "six_condition_collective_foraging_v1",
+        "mission_mode": swarm_mission_mode,
+        "trip_limit_applies": swarm_mission_mode == "trip_limited",
+        "mission_termination": (
+            "NEST_ENERGY_TARGET_OR_HORIZON"
+            if swarm_mission_mode == "research"
+            else "FORAGING_TRIPS_OR_HORIZON"
+        ),
+        "canonical_summary_file": "swarm_summary.json",
+        "legacy_summary_file_classification": "NOT_APPLICABLE_LEGACY_SINGLE_ROBOT_LOGGER",
         "experiment_mode": experiment_mode.snapshot(),
         "experiment_mode_matrix": all_mode_snapshots(),
         "experiment_mode_environment_variable": "SWARM_EXPERIMENT_MODE",
@@ -195,6 +204,10 @@ def main() -> int:
             "enabled": scout_count > 1,
             "scout_count": scout_count,
             "trip_count_per_scout": trip_count,
+            "trip_count_role": (
+                "development_tooling_only" if swarm_mission_mode == "research"
+                else "trip_termination_limit"
+            ),
             "duration_s": swarm_duration_s,
             "policy": "LOCAL_REACTIVE_45_DEGREE_FULL_FORAGING_CYCLE",
             "working_memory_enabled": False,

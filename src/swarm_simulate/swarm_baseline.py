@@ -239,7 +239,15 @@ class BaselineSwarmRunner:
         if scout.turn_remaining_rad:
             return self._continue_turn(scout)
 
-        if snapshot.front_m > self.safe_front_m:
+        # A front-clear beam alone is insufficient near a wall endpoint: the
+        # circular body can side-swipe the corner on the next forward tick.
+        # Use the same current side-clearance rule as normal exploration
+        # before an obstacle-escape maneuver may commit to translation.
+        if (
+            snapshot.front_m > self.safe_front_m
+            and min(snapshot.left_m, snapshot.right_m)
+            >= self.turn_side_clearance_m
+        ):
             self._clear_escape(scout)
             return self.linear_speed_mps, 0.0, "OBSTACLE_ESCAPE_FORWARD"
         if scout.escape_direction == 0.0:

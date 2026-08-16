@@ -37,7 +37,7 @@ def main() -> None:
         raise SystemExit("usage: aggregate_common_metrics.py <runs_root> <output_dir>")
     root, output = Path(sys.argv[1]), Path(sys.argv[2])
     output.mkdir(parents=True, exist_ok=True)
-    research, scouts, returns, energy, funnel, coverage, trips, rates, repetition = ([] for _ in range(9))
+    research, scouts, episodes, returns, energy, funnel, coverage, trips, rates, repetition = ([] for _ in range(10))
 
     for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         summary_path = run_dir / "swarm_summary.json"
@@ -77,7 +77,7 @@ def main() -> None:
             scoped_events = [row["event"] for row in events if row["scout_id"] == sid]
             scouts.append({"run_id": run_id, "seed": seed, "scout_id": sid, "behavioral_outcome": item.get("behavioral_outcome"), "phase_at_termination": item.get("phase_at_termination"), "started_trip_count": item.get("started_trip_count"), "completed_trip_count": item.get("completed_trip_count"), "resource_found_count": item.get("resource_found_count"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count"), "total_distance_m": distance, "coverage_cells": len(cells), "actual_active_time_s": active_time, "contact_stalled": item.get("contact_stalled"), "return_arbitration_pathology": item.get("return_arbitration_pathology"), "wm_enabled": False, "em_enabled": False, "exchange_mode": "off", "aih_enabled": False, "aih_level": None, "aih_update_count": 0, "aih_influenced_decision_count": 0})
             coverage.append({"run_id": run_id, "seed": seed, "scout_id": sid, "total_distance_m": distance, "coverage_cells": len(cells), "coverage_cells_per_meter": len(cells) / distance if distance else 0.0, "coverage_gain_per_minute": 60 * len(cells) / active_time if active_time else 0.0})
-            trips.append({"run_id": run_id, "seed": seed, "scout_id": sid, "started_trip_count": item.get("started_trip_count"), "completed_trip_count": item.get("completed_trip_count"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "delivery_count": item.get("delivery_count")})
+            trips.append({"run_id": run_id, "seed": seed, "scout_id": sid, "started_trip_count": item.get("started_trip_count"), "completed_trip_count": item.get("completed_trip_count"), "resource_detection_count": scoped_events.count("RESOURCE_DETECTED"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count")})
             repetition.append({"run_id": run_id, "seed": seed, "scout_id": sid, "revisit_count": revisits, "repeated_decision_count": repeated_decisions, "local_cycle_episode_count": 0, "repeated_local_behavior_duration_s": 0.0})
             if f(item.get("delivery_count")) > 0:
                 contributing += 1
@@ -91,17 +91,51 @@ def main() -> None:
             minimum_t, minimum = min(distances, key=lambda item: item[1])
             delivered = any(row["event"] == "DELIVER" and row["scout_id"] == sid and row["trip_id"] == start["trip_id"] for row in events)
             reached = any(row["event"] == "NEST_REACHED" and row["scout_id"] == sid and row["trip_id"] == start["trip_id"] for row in events)
-            returns.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": start["trip_id"], "return_start_time_s": start["sim_time_s"], "return_start_distance_to_nest_m": distances[0][1], "minimum_distance_to_nest_m": minimum, "time_of_minimum_distance_s": minimum_t, "final_distance_to_nest_m": distances[-1][1], "return_duration_s": distances[-1][0] - distances[0][0], "nest_reached": reached, "delivered": delivered})
-        episodes: dict[tuple[str, str], list[str]] = defaultdict(list)
+            returns.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": start["trip_id"], "return_start_time_s": start["sim_time_s"], "start_distance_to_nest_m": distances[0][1], "minimum_distance_to_nest_m": minimum, "time_of_minimum_distance_s": minimum_t, "final_distance_to_nest_m": distances[-1][1], "return_duration_s": distances[-1][0] - distances[0][0], "nest_reached": reached, "delivered": delivered})
+        episode_events: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
         for row in events:
             if row["scout_id"] != "COLONY" and row["trip_id"]:
-                episodes[(row["scout_id"], row["trip_id"])].append(row["event"])
-        for (sid, trip_id), names in episodes.items():
+                episode_events[(row["scout_id"], row["trip_id"])].append(row)
+        for (sid, trip_id), event_rows in episode_events.items():
+            names = [row["event"] for row in event_rows]
             if "SCOUT_START" not in names and "NEXT_TRIP_START" not in names and not any(name in names for name in ("RESOURCE_DETECTED", "COLLECT", "RETURN_HOME_START", "NEST_REACHED", "DELIVER")):
                 continue
+            first_time = lambda event: next((row["sim_time_s"] for row in event_rows if row["event"] == event), "")
+            trajectory_rows = [
+                row for row in by_scout[sid] if row.get("trip_id") == trip_id
+            ]
+            trip_start = first_time("SCOUT_START") or first_time("NEXT_TRIP_START") or event_rows[0]["sim_time_s"]
+            delivered = "DELIVER" in names
+            if delivered:
+                status = "DELIVERED"
+            elif "RETURN_HOME_START" in names:
+                status = "RETURN_IN_PROGRESS_AT_HORIZON"
+            elif "COLLECT" in names:
+                status = "COLLECTED_NOT_RETURNED_AT_HORIZON"
+            elif "RESOURCE_DETECTED" in names:
+                status = "RESOURCE_DETECTED_NOT_COLLECTED_AT_HORIZON"
+            else:
+                status = "RESOURCE_NOT_FOUND_AT_HORIZON"
+            episodes.append({
+                "run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": trip_id,
+                "trip_start_time_s": trip_start,
+                "resource_detected": "RESOURCE_DETECTED" in names,
+                "resource_detected_time_s": first_time("RESOURCE_DETECTED"),
+                "collected": "COLLECT" in names,
+                "collection_time_s": first_time("COLLECT"),
+                "return_started": "RETURN_HOME_START" in names,
+                "return_start_time_s": first_time("RETURN_HOME_START"),
+                "nest_reached": "NEST_REACHED" in names,
+                "nest_reached_time_s": first_time("NEST_REACHED"),
+                "delivered": delivered,
+                "delivery_time_s": first_time("DELIVER"),
+                "episode_status": status,
+                "episode_end_time_s": (first_time("DELIVER") if delivered else (trajectory_rows[-1]["sim_time_s"] if trajectory_rows else duration)),
+                "trip_distance_m": (trajectory_rows[-1]["trip_distance_m"] if trajectory_rows else 0.0),
+            })
             funnel.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": trip_id, "trip_started": int("SCOUT_START" in names or "NEXT_TRIP_START" in names), "resource_detected": int("RESOURCE_DETECTED" in names), "collected": int("COLLECT" in names), "return_started": int("RETURN_HOME_START" in names), "nest_reached": int("NEST_REACHED" in names), "delivered": int("DELIVER" in names)})
 
-    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_scout.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition)]
+    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_scout.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition)]
     for name, rows in specs:
         write_csv(output / name, rows, list(rows[0]) if rows else [])
     (output / "baseline_research_summary.json").write_text(json.dumps({"run_count": len(research), "valid_run_count": sum(row["experimental_validity"] == "VALID" for row in research), "mission_success_count": sum(row["mission_outcome"] == "MISSION_SUCCESS" for row in research)}, indent=2), encoding="utf-8")
