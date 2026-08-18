@@ -699,6 +699,23 @@ class BaselineSwarmRunner:
                         if scout.recovery_translation_m >= self.safe_front_m:
                             scout.contact_recovery_episode_count = 0
                         action = "CONTACT_RECOVERY_COMPLETE"
+                    elif scout.contact_recovery_episode_count < 2:
+                        # The first bounded maneuver made real motion but a
+                        # current collision remains (for example at a wall
+                        # corner while another physical Scout is nearby).
+                        # This is not yet a stalled actuator.  Take exactly
+                        # one further fresh-sensor recovery maneuver before
+                        # classifying the run as an engineering failure.
+                        # The counter is current contact-actuator state only;
+                        # it is cleared after a proven departure and never
+                        # records a place, peer identity, or route.
+                        scout.contact_recovery_episode_count += 1
+                        scout.contact_recovery_count += 1
+                        scout.recovery_stage = "BACK_OFF"
+                        scout.recovery_steps_remaining = self.bypass_departure_step_count
+                        scout.recovery_translation_m = 0.0
+                        scout.recovery_rotation_rad = 0.0
+                        action = "CONTACT_RECOVERY_RETRY"
                     else:
                         # This recovery episode itself failed to move the body
                         # or rotate it out of contact.  That is a genuine
@@ -823,6 +840,10 @@ class BaselineSwarmRunner:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "CONTACT_RECOVERY_START",
                                            "detail": "bounded back-off and fresh-LiDAR reorientation"})
+                elif action == "CONTACT_RECOVERY_RETRY":
+                    event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                           "trip_id": scout.trip_id, "event": "CONTACT_RECOVERY_RETRY",
+                                           "detail": "first recovery moved but collision persisted; one final fresh-LiDAR maneuver"})
             if self.render_enabled and step % 3 == 0:
                 self.env.render()
                 self._draw_energy_marker()
