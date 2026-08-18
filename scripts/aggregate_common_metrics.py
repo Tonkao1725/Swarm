@@ -91,7 +91,8 @@ def main() -> None:
             minimum_t, minimum = min(distances, key=lambda item: item[1])
             delivered = any(row["event"] == "DELIVER" and row["scout_id"] == sid and row["trip_id"] == start["trip_id"] for row in events)
             reached = any(row["event"] == "NEST_REACHED" and row["scout_id"] == sid and row["trip_id"] == start["trip_id"] for row in events)
-            returns.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": start["trip_id"], "return_start_time_s": start["sim_time_s"], "start_distance_to_nest_m": distances[0][1], "minimum_distance_to_nest_m": minimum, "time_of_minimum_distance_s": minimum_t, "final_distance_to_nest_m": distances[-1][1], "return_duration_s": distances[-1][0] - distances[0][0], "nest_reached": reached, "delivered": delivered})
+            end_time = next((row["sim_time_s"] for row in events if row["event"] == "DELIVER" and row["scout_id"] == sid and row["trip_id"] == start["trip_id"]), distances[-1][0])
+            returns.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": start["trip_id"], "return_start_time_s": start["sim_time_s"], "return_end_time_s": end_time, "return_duration_s": f(end_time) - f(start["sim_time_s"]), "start_distance_to_nest_m": distances[0][1], "minimum_distance_to_nest_m": minimum, "time_of_minimum_distance_s": minimum_t, "final_distance_to_nest_m": distances[-1][1], "distance_reduction_m": distances[0][1] - distances[-1][1], "relative_return_progress": (distances[0][1] - distances[-1][1]) / distances[0][1] if distances[0][1] else 0.0, "nest_reached": reached, "delivered": delivered, "return_status": "DELIVERED" if delivered else "RETURN_IN_PROGRESS_AT_HORIZON"})
         episode_events: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
         for row in events:
             if row["scout_id"] != "COLONY" and row["trip_id"]:
@@ -132,10 +133,12 @@ def main() -> None:
                 "episode_status": status,
                 "episode_end_time_s": (first_time("DELIVER") if delivered else (trajectory_rows[-1]["sim_time_s"] if trajectory_rows else duration)),
                 "trip_distance_m": (trajectory_rows[-1]["trip_distance_m"] if trajectory_rows else 0.0),
+                "phase_at_episode_end": (trajectory_rows[-1]["phase"] if trajectory_rows else "NOT_OBSERVED"),
+                "actual_episode_duration_s": f(first_time("DELIVER") if delivered else (trajectory_rows[-1]["sim_time_s"] if trajectory_rows else duration)) - f(trip_start),
             })
             funnel.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": trip_id, "trip_started": int("SCOUT_START" in names or "NEXT_TRIP_START" in names), "resource_detected": int("RESOURCE_DETECTED" in names), "collected": int("COLLECT" in names), "return_started": int("RETURN_HOME_START" in names), "nest_reached": int("NEST_REACHED" in names), "delivered": int("DELIVER" in names)})
 
-    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_scout.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition)]
+    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_episode.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition)]
     for name, rows in specs:
         write_csv(output / name, rows, list(rows[0]) if rows else [])
     (output / "baseline_research_summary.json").write_text(json.dumps({"run_count": len(research), "valid_run_count": sum(row["experimental_validity"] == "VALID" for row in research), "mission_success_count": sum(row["mission_outcome"] == "MISSION_SUCCESS" for row in research)}, indent=2), encoding="utf-8")

@@ -1,0 +1,29 @@
+{
+  "schema_version": "research_seed_set_v1",
+  "status": "RECOVERED_CANONICAL_MANIFEST",
+  "recovery_date": "2026-08-18",
+  "recovery_basis": "Canonical R01-R20 values supplied by the project owner and corroborated by BASELINE_CONDITION1_FREEZE_V1.md (R03 = 358777504).",
+  "reuse_policy": "Use this exact ordered set unchanged for Conditions 1-6. Do not regenerate or substitute seeds.",
+  "seeds": [
+    {"run_id": "R01", "seed": 82784102},
+    {"run_id": "R02", "seed": 98386804},
+    {"run_id": "R03", "seed": 358777504},
+    {"run_id": "R04", "seed": 385197017},
+    {"run_id": "R05", "seed": 413997162},
+    {"run_id": "R06", "seed": 517647040},
+    {"run_id": "R07", "seed": 565425870},
+    {"run_id": "R08", "seed": 711213266},
+    {"run_id": "R09", "seed": 1055674384},
+    {"run_id": "R10", "seed": 1116278677},
+    {"run_id": "R11", "seed": 1173346196},
+    {"run_id": "R12", "seed": 1191607443},
+    {"run_id": "R13", "seed": 1308983833},
+    {"run_id": "R14", "seed": 1399633088},
+    {"run_id": "R15", "seed": 1672527435},
+    {"run_id": "R16", "seed": 1710654405},
+    {"run_id": "R17", "seed": 1729431144},
+    {"run_id": "R18", "seed": 1759674302},
+    {"run_id": "R19", "seed": 1763236383},
+    {"run_id": "R20", "seed": 1985724812}
+  ]
+}

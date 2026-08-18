@@ -116,6 +116,13 @@ def main() -> int:
         else PROJECT_ROOT / "results" / experiment_mode.mode.value
     )
     batch_run_id = os.environ.get("SWARM_RUN_ID", "").strip() or None
+    # Research-batch provenance is supplied by the immutable freeze procedure.
+    # It is metadata only and is never read by a controller or sensor.
+    freeze_commit = os.environ.get("SWARM_FREEZE_COMMIT", "").strip() or "UNSPECIFIED"
+    freeze_tag = os.environ.get("SWARM_FREEZE_TAG", "").strip() or "UNSPECIFIED"
+    canonical_seed_set_sha256 = os.environ.get(
+        "SWARM_CANONICAL_SEED_SET_SHA256", ""
+    ).strip() or "UNSPECIFIED"
     exploration_config = AutonomousForagingConfig(
         movement_step_m=0.10,
         # The ±20° front beams can clear a wall corner while the 0.25 m
@@ -185,8 +192,23 @@ def main() -> int:
         active_energy=energy_sensor.active_endpoint,
     )
 
+    # Startup proof: make the active behavioral-testbed configuration visible
+    # in every terminal log so a mixed spatial scale cannot be mistaken for a
+    # valid research run.
+    print(
+        "STARTUP_CONFIG "
+        "arena=14x14m; robot_radius=0.25m; wall_thickness=0.18m; "
+        f"scouts={scout_count}; mission_mode={swarm_mission_mode}; "
+        f"nest_energy_target={nest_energy_target}; horizon_s={swarm_duration_s}; "
+        f"WM={experiment_mode.memory_enabled}; "
+        f"EM={experiment_mode.experience_memory_enabled}; "
+        "Exchange=False; AIH=False; "
+        f"world_config={BASE_WORLD_FILE}; runner=BaselineSwarmRunner; "
+        f"git_commit={freeze_commit}; git_tag={freeze_tag}"
+    )
+
     run_config = {
-        "test_name": "six_condition_collective_foraging_v1",
+        "test_name": "controlled_behavioral_foraging_environment_v1",
         "mission_mode": swarm_mission_mode,
         "trip_limit_applies": swarm_mission_mode == "trip_limited",
         "mission_termination": (
@@ -244,20 +266,15 @@ def main() -> int:
             "reason": "Hold environment constant while measuring learning",
         },
         "maze_design": {
-            "name": "compact_complex_perfect_maze_v2",
-            "generation_seed": 10777,
-            "topology": "CONNECTED_ACYCLIC_TREE",
-            "logical_cells": [5, 5],
-            "physical_grid": [11, 11],
-            "cell_size_m": 1.25,
-            "corridor_width_m": 1.25,
-            "world_width_m": 13.75,
-            "world_height_m": 13.75,
-            "logical_junction_count": 6,
-            "dead_end_count": 7,
-            "energy_dead_end_count": 6,
-            "multi_robot_spatial_preparation": True,
-            "graph_loops_enabled": False,
+            "name": "original_selected_validated_maze",
+            "topology": "HISTORICAL_FIXED_WALL_TOPOLOGY",
+            "corridor_width_definition": "geometry_derived",
+            "corridor_width_nominal_m": None,
+            "world_width_m": 14.0,
+            "world_height_m": 14.0,
+            "robot_radius_m": 0.25,
+            "wall_thickness_m": 0.18,
+            "generation_seed": None,
         },
         "energy_detection_radius_m": (
             energy_sensor.detection_radius_m
@@ -314,6 +331,11 @@ def main() -> int:
         "decision_random_seed": seed,
         "render_enabled": render_enabled,
         "batch_run_id": batch_run_id,
+        "research_provenance": {
+            "freeze_commit": freeze_commit,
+            "freeze_tag": freeze_tag,
+            "canonical_seed_set_sha256": canonical_seed_set_sha256,
+        },
         "motion": vars(motion_config),
         "drive": vars(drive_config),
         "encoder": vars(encoder_config),

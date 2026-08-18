@@ -17,7 +17,7 @@ import random
 from typing import Any
 
 import numpy as np
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, FancyArrowPatch
 
 from energy_sensor import RandomEndpointEnergySensor
 from irsim_range_sensor import IRSimDirectionalRangeSensor
@@ -141,16 +141,25 @@ class BaselineSwarmRunner:
         # Display-only marker for visual replay.  It has no IR-SIM body and
         # never participates in collision, sensing, or controller state.
         self._display_energy_marker = None
+        # IR-SIM's stock velocity glyph is 0.40 m long regardless of robot
+        # size.  Use a display-only, physical-scale heading marker instead.
+        self._display_heading_arrows: list[FancyArrowPatch] = []
         self._add_scouts()
         self.sensors = [
             IRSimDirectionalRangeSensor(env=env, range_max_m=5.0, robot_id=i)
             for i in range(self.scout_count)
         ]
+        # Condition 1 is one colony with one physical Nest, not one private
+        # "home" per initial Scout position.  Keep this common, fixed cue
+        # separate from the Scouts' current poses so every delivery is scored
+        # against the same colony Nest.  The value is read once at setup and
+        # is not an outbound route, waypoint, or learned state.
+        nest_pose = self._pose(env, 0)
         self.scouts = [
             ScoutState(
                 scout_id=i,
                 rng=random.Random(self.seed + 104729 * i),
-                home=self._pose(env, i),
+                home=RobotPose(nest_pose.x_m, nest_pose.y_m, nest_pose.theta_rad),
             )
             for i in range(self.scout_count)
         ]
@@ -175,7 +184,10 @@ class BaselineSwarmRunner:
                 sensors=[{"name": "lidar2d", "range_min": 0.05, "range_max": 5.0,
                           "angle_range": math.pi, "number": 181, "noise": False,
                           "alpha": 0.10}],
-                plot={"show_trail": False, "show_sensor": False, "show_goal": False},
+                # Hide IR-SIM's fixed-size (0.4 m) velocity glyph.  It is
+                # visually larger than the 0.10 m physical-scale robot.
+                plot={"show_trail": False, "show_sensor": False, "show_goal": False,
+                      "show_arrow": False},
             ))
         if extras:
             self.env.add_objects(extras)
@@ -198,6 +210,43 @@ class BaselineSwarmRunner:
             )
         if self._display_energy_marker not in axes.patches:
             axes.add_patch(self._display_energy_marker)
+
+    def _draw_scout_heading_markers(self) -> None:
+        """Draw one display-only, maze-scale heading arrow per Scout."""
+        if not self.render_enabled:
+            return
+        import matplotlib.pyplot as plt
+
+        figure = plt.gcf()
+        if not figure.axes:
+            return
+        axes = figure.axes[0]
+        marker_length_m = 0.30
+        while len(self._display_heading_arrows) < self.scout_count:
+            arrow = FancyArrowPatch(
+                (0.0, 0.0), (0.0, 0.0),
+                arrowstyle="-|>", mutation_scale=9,
+                linewidth=1.2, color="gold", zorder=110,
+            )
+            self._display_heading_arrows.append(arrow)
+            axes.add_patch(arrow)
+        for scout_id, arrow in enumerate(self._display_heading_arrows):
+            pose = self._pose(self.env, scout_id)
+            # Red is a visual-only carrying indicator.  It reads the current
+            # physical carry state; it is not fed back into any controller
+            # decision, memory, or inter-Scout communication.
+            carrying_energy = (
+                self.resource_carrier_id == scout_id
+                and self.scouts[scout_id].phase == "RETURN_HOME"
+            )
+            arrow.set_color("red" if carrying_energy else "gold")
+            arrow.set_positions(
+                (pose.x_m, pose.y_m),
+                (
+                    pose.x_m + marker_length_m * math.cos(pose.theta_rad),
+                    pose.y_m + marker_length_m * math.sin(pose.theta_rad),
+                ),
+            )
 
     @staticmethod
     def _pose(env, scout_id: int) -> RobotPose:
@@ -380,7 +429,7 @@ class BaselineSwarmRunner:
         """Require measured recovery motion and a collision-free current body."""
         robot = self.env.robot_list[scout.scout_id]
         return (
-            scout.recovery_translation_m >= 0.01
+            scout.recovery_translation_m >= 0.003
             and scout.recovery_rotation_rad >= math.radians(10.0)
             and not bool(robot.collision)
             and not bool(robot.stop_flag)
@@ -492,9 +541,19 @@ class BaselineSwarmRunner:
             direction = 1.0 if heading_error > 0.0 else -1.0
             turn_side_clearance = snapshot.left_m if direction > 0.0 else snapshot.right_m
             home_ray, _, home_inside_fov, home_ray_valid = sensor.ray_distance(heading_error)
+            # An outside-FOV home bearing is not an obstacle observation.  A
+            # prior implementation treated it as one, entering bypass even in
+            # open space and forcing a long departure away from the Nest.
+            # Rotate one body-safe 45-degree primitive to bring the cue into
+            # the forward sensor field; only an *observed*, unsafe home ray
+            # may invoke obstacle bypass.
+            home_ray_blocked = (
+                home_inside_fov
+                and (not home_ray_valid or home_ray <= self.safe_front_m)
+            )
             if (
                 turn_side_clearance < self.turn_side_clearance_m
-                or not (home_inside_fov and home_ray_valid and home_ray > self.safe_front_m)
+                or home_ray_blocked
             ):
                 scout.bypass_active = True
                 scout.escape_direction = 0.0
@@ -698,6 +757,8 @@ class BaselineSwarmRunner:
                 scout.distance_m += moved
                 scout.trip_distance_m += moved
                 scout.previous_pose = pose
+                # Passive research metric only.  Restore the historical
+                # maze-scale 0.50 m reporting bin; this never feeds control.
                 coverage[scout.scout_id].add((math.floor(pose.x_m / 0.5), math.floor(pose.y_m / 0.5)))
                 trajectory_writer.writerow({
                     "sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
@@ -765,6 +826,7 @@ class BaselineSwarmRunner:
             if self.render_enabled and step % 3 == 0:
                 self.env.render()
                 self._draw_energy_marker()
+                self._draw_scout_heading_markers()
             delivered_this_tick = sum(s.delivery_count for s in self.scouts)
             if self.mission_mode == "research" and delivered_this_tick >= self.nest_energy_target:
                 mission_complete = True

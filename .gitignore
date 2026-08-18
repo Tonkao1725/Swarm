@@ -16,6 +16,7 @@ maze_clearance_report.json
 maze_preview.png
 
 # Runtime and temporary files
+config/robot_world_runtime_*.yaml
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

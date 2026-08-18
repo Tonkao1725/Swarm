@@ -29,6 +29,13 @@ bearing when it lies in the LiDAR field of view. +/-45 rays are a body-corner
 clearance guard for a 0.25 m circular robot; they are not additional memory,
 mapping, communication, or planning capability.
 
+For physical multi-Scout contact recovery only, a Scout also receives the
+instantaneous bearing away from a currently body-contacting peer (within the
+0.62 m release radius). This is a local tactile/proximity safety cue and is
+discarded as soon as contact releases; it carries no identity, message,
+history, route, or map information. It is common physical safety
+infrastructure for every Condition.
+
 This idealized current-scan sensing abstraction is common infrastructure for
 Conditions 1–6A/6B. Any future condition may add its experimental mechanism,
 but must retain this sensor model and physics.
