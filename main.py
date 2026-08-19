@@ -85,7 +85,14 @@ def main() -> int:
             str(time.time_ns() % 2_147_483_647),
         )
     )
-    render_enabled = _env_bool("IRSIM_RENDER", True)
+    fast_headless_research_mode = _env_bool(
+        "FAST_HEADLESS_RESEARCH_MODE", False
+    )
+    # Fast headless mode changes wall-clock overhead only.  It never changes
+    # dt, command cadence, physics, sensor reads, RNG, or simulated horizon.
+    render_enabled = (
+        False if fast_headless_research_mode else _env_bool("IRSIM_RENDER", True)
+    )
     experiment_mode = resolve_experiment_mode()
     trip_count = int(
         os.environ.get("FORAGING_TRIPS", "5")
@@ -204,6 +211,7 @@ def main() -> int:
         f"EM={experiment_mode.experience_memory_enabled}; "
         "Exchange=False; AIH=False; "
         f"world_config={BASE_WORLD_FILE}; runner=BaselineSwarmRunner; "
+        f"fast_headless={fast_headless_research_mode}; "
         f"git_commit={freeze_commit}; git_tag={freeze_tag}"
     )
 
@@ -237,7 +245,7 @@ def main() -> int:
             "hormone_enabled": False,
             "exchange_enabled": False,
             "shared_map_created": False,
-            "return_navigation": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
+            "return_navigation": "RSSI_GRADIENT_LOCAL_REACTIVE_COMMON_INFRASTRUCTURE",
         },
         "trip_control_environment_variable": (
             "FORAGING_TRIPS"
@@ -330,6 +338,12 @@ def main() -> int:
         "energy_random_seed": seed ^ 0x5A17,
         "decision_random_seed": seed,
         "render_enabled": render_enabled,
+        "fast_headless_research_mode": fast_headless_research_mode,
+        "execution_semantics": (
+            "FAST_HEADLESS_NO_GUI_OR_REDRAW; identical physics/control/sensor/RNG steps"
+            if fast_headless_research_mode
+            else "STANDARD_EXECUTION"
+        ),
         "batch_run_id": batch_run_id,
         "research_provenance": {
             "freeze_commit": freeze_commit,
@@ -414,7 +428,7 @@ def main() -> int:
             "navigation_model": "MEMORY_FREE_LOCAL_REACTIVE_BASELINE",
             "decision_policy": (
                 "CURRENT_TOF_LOCAL_AVOIDANCE; STRICT_LOS_SOLAR; "
-                "STATELESS_HOME_VECTOR"
+                "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE"
             ),
             "working_memory_reset_each_trip": False,
             "experience_memory_persists_across_trips": False,
@@ -425,11 +439,10 @@ def main() -> int:
                 "artificial_internal_hormone": False,
                 "route_breadcrumbs": False,
                 "reactive_exploration": True,
-                "nest_cue": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
+                "nest_cue": "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE",
                 "nest_cue_definition": (
-                    "IDEALIZED_COMMON_STATELESS_NEST_HOMING_CUE; "
-                    "instantaneous nest direction only; no route, history, "
-                    "map, or planner"
+                    "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE; scalar signal "
+                    "only; no position, distance, bearing, route, map, or planner"
                 ),
             },
             "available_system_capabilities": {

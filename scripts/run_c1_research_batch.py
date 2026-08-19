@@ -23,10 +23,21 @@ def main() -> int:
     commit = os.environ["C1_RESEARCH_COMMIT"]
     tag = os.environ["C1_RESEARCH_TAG"]
     root = PROJECT_ROOT / "results" / label
-    root.mkdir(parents=True, exist_ok=False)
-    completed: list[dict[str, object]] = []
-    for index, seed in enumerate(SEEDS, start=1):
-        run_id = f"R{index:02d}_seed{seed}_3600s"
+    resume_from = int(os.environ.get("C1_RESEARCH_RESUME_FROM", "1"))
+    if resume_from == 1:
+        root.mkdir(parents=True, exist_ok=False)
+        completed: list[dict[str, object]] = []
+    else:
+        status_path = root / "batch_status.json"
+        if not status_path.exists():
+            raise RuntimeError("Resume requested but no prior batch status exists")
+        prior = json.loads(status_path.read_text(encoding="utf-8"))
+        completed = list(prior.get("completed_runs", []))
+        if len(completed) != resume_from - 1 or not all(row.get("valid") for row in completed):
+            raise RuntimeError("Resume point does not match an all-valid prior prefix")
+    for index, seed in enumerate(SEEDS[resume_from - 1:], start=resume_from):
+        suffix = "_rerun" if index == resume_from and resume_from > 1 else ""
+        run_id = f"R{index:02d}{suffix}_seed{seed}_3600s"
         run_dir = root / run_id
         env = os.environ.copy()
         env.update({

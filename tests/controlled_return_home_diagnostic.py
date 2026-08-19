@@ -1,9 +1,9 @@
-"""Controlled, non-research proof of the C1 RETURN_HOME primitive.
+"""Controlled, non-research proof of the C1 RSSI-feedback return primitive.
 
 The research maze is deliberately not changed.  This fixture places one
-already-carrying Scout in obstacle-free line of sight of the common Nest and
-uses the production BaselineSwarmRunner unchanged.  It proves the sign of the
-home cue, 45-degree turns, nest-radius transition, and delivery transition.
+already-carrying Scout in obstacle-free space and uses the production
+BaselineSwarmRunner unchanged.  It proves scalar RSSI improvement, the
+environment-only Nest arrival transition, and delivery transition.
 """
 from __future__ import annotations
 
@@ -54,14 +54,11 @@ def main() -> int:
         env.robot_list[2]._state = np.asarray([12.0, 12.0, 0.0]).reshape(3, 1)
         runner.scouts[0].phase = "COMPLETE"
         runner.scouts[2].phase = "COMPLETE"
-        # Scout 1 begins east of the Nest and faces north.  Production return
-        # logic must turn CCW twice, advance west, enter the 0.12 m Nest
-        # radius at (1.0, 1.0), and deliver.
-        env.robot_list[1]._state = np.asarray([1.80, 1.00, math.pi / 2.0]).reshape(3, 1)
+        # Scout 1 begins east of the Nest pointing west. It receives only the
+        # scalar beacon, which becomes stronger while moving forward.
+        env.robot_list[1]._state = np.asarray([1.80, 1.00, math.pi]).reshape(3, 1)
         runner.scouts[1].phase = "RETURN_HOME"
         runner.resource_carrier_id = 1
-        common_homes = [(s.home.x_m, s.home.y_m) for s in runner.scouts]
-        assert common_homes == [(1.0, 1.0)] * 3, common_homes
         result = runner.run()
     finally:
         env.end()
@@ -74,10 +71,10 @@ def main() -> int:
     assert "CONTACT_STALLED" not in events
     report = {
         "classification": "NOT_RESEARCH_DATA",
-        "fixture": "clear_line_of_sight_return_to_common_nest",
+        "fixture": "open_area_rssi_gradient_return_to_common_nest",
         "common_nest_m": [1.0, 1.0],
-        "start_pose_m_rad": [1.8, 1.0, math.pi / 2.0],
-        "expected_turn_sign": "CCW for positive wrapped heading error",
+        "start_pose_m_rad": [1.8, 1.0, math.pi],
+        "controller_input": "idealized_rssi_like_scalar_only",
         "required_events": required,
         "result": result,
     }

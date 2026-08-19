@@ -62,6 +62,13 @@ class IRSimDirectionalRangeSensor:
         self.front_right_angle_rad = math.radians(-20.0)
 
         self._sequence = 0
+        # A controller tick may request the nominal ToF frame, a strict-LOS
+        # solar query, and two corner-clearance rays.  They all represent the
+        # same physical instant. Cache only that instant's raw scan so the
+        # adapter never performs redundant simulator I/O or exposes a later
+        # observation to one consumer within the same control tick.
+        self._cached_scan_time_s: float | None = None
+        self._cached_clean_scan: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
     def _pose(self) -> RobotPose:
         values = np.asarray(
@@ -131,6 +138,12 @@ class IRSimDirectionalRangeSensor:
     def _clean_scan(
         self,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        now = float(self.env.time)
+        if (
+            self._cached_scan_time_s == now
+            and self._cached_clean_scan is not None
+        ):
+            return self._cached_clean_scan
         scan = self.env.get_lidar_scan(id=self.robot_id)
         if not isinstance(scan, dict):
             raise RuntimeError(
@@ -184,7 +197,9 @@ class IRSimDirectionalRangeSensor:
             self.range_min_m,
             self.range_max_m,
         )
-        return clean_ranges, angles, valid
+        self._cached_scan_time_s = now
+        self._cached_clean_scan = (clean_ranges, angles, valid)
+        return self._cached_clean_scan
 
     def ray_distance(
         self,

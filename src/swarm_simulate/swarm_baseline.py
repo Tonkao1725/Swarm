@@ -32,7 +32,6 @@ def _wrap(angle: float) -> float:
 class ScoutState:
     scout_id: int
     rng: random.Random
-    home: RobotPose
     phase: str = "EXPLORE"
     trip_id: int = 1
     started_trip_count: int = 1
@@ -81,7 +80,30 @@ class ScoutState:
     previous_pose: RobotPose | None = None
     trip_start_s: float = 0.0
     collected_at_s: float | None = None
+    # One immediately preceding scalar beacon observation is low-level sensor
+    # feedback, not route/branch/position memory.  It is reset at the start
+    # of every return and is never available to Explore.
+    previous_nest_rssi: float | None = None
     trip_rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IdealizedRSSILikeNestBeacon:
+    """Environment-owned common Nest beacon.
+
+    The environment retains the physical nest position solely to synthesize a
+    deterministic scalar measurement.  The behavioral controller receives
+    only the return value of :meth:`sample`, never this object or its x/y.
+    Values are unitless and intentionally are not claimed as calibrated dBm.
+    """
+
+    nest_x_m: float
+    nest_y_m: float
+    scale_m: float = 2.0
+
+    def sample(self, pose: RobotPose) -> float:
+        distance = math.hypot(pose.x_m - self.nest_x_m, pose.y_m - self.nest_y_m)
+        return 1.0 / (1.0 + distance / self.scale_m)
 
 
 class BaselineSwarmRunner:
@@ -149,17 +171,17 @@ class BaselineSwarmRunner:
             IRSimDirectionalRangeSensor(env=env, range_max_m=5.0, robot_id=i)
             for i in range(self.scout_count)
         ]
-        # Condition 1 is one colony with one physical Nest, not one private
-        # "home" per initial Scout position.  Keep this common, fixed cue
-        # separate from the Scouts' current poses so every delivery is scored
-        # against the same colony Nest.  The value is read once at setup and
-        # is not an outbound route, waypoint, or learned state.
+        # This is environment-only geometry.  It is used to synthesize a
+        # common scalar RSSI-like signal and to score physical Nest arrival;
+        # no Scout/controller receives the position, bearing, or distance.
         nest_pose = self._pose(env, 0)
+        self._nest_beacon = IdealizedRSSILikeNestBeacon(
+            nest_x_m=nest_pose.x_m, nest_y_m=nest_pose.y_m,
+        )
         self.scouts = [
             ScoutState(
                 scout_id=i,
                 rng=random.Random(self.seed + 104729 * i),
-                home=RobotPose(nest_pose.x_m, nest_pose.y_m, nest_pose.theta_rad),
             )
             for i in range(self.scout_count)
         ]
@@ -312,81 +334,10 @@ class BaselineSwarmRunner:
         self._start_turn(scout, direction, reason)
         return self._continue_turn(scout)
 
-    def _return_bypass_command(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str] | None:
-        """Arbitrate current nest bearing against current free space only."""
-        if not scout.bypass_active:
-            return None
-        if scout.turn_remaining_rad:
-            return self._continue_turn(scout)
-        if scout.escape_direction != 0.0:
-            # A local turn whose front is still body-unsafe has not completed
-            # its maneuver.  Continue around the same currently selected
-            # side rather than re-score the home cue and immediately reverse
-            # the preceding 45-degree turn.
-            if snapshot.front_m <= self.safe_front_m:
-                self._start_turn(
-                    scout,
-                    scout.escape_direction,
-                    "RETURN_LOCAL_ARBITRATION_TURN_45",
-                )
-                return self._continue_turn(scout)
-            scout.escape_direction = 0.0
-        if scout.bypass_departure_steps:
-            if snapshot.front_m > self.safe_front_m:
-                scout.bypass_departure_steps -= 1
-                return self.linear_speed_mps, 0.0, "RETURN_BYPASS_DEPART_FORWARD"
-            scout.bypass_departure_steps = 0
-
-        pose = snapshot.pose
-        desired = math.atan2(scout.home.y_m - pose.y_m, scout.home.x_m - pose.x_m)
-        error = _wrap(desired - pose.theta_rad)
-        candidates: list[tuple[float, float]] = []
-        for offset in (0.0, -math.pi / 4.0, math.pi / 4.0, -math.pi / 2.0, math.pi / 2.0):
-            ray, _, inside, valid = sensor.ray_distance(offset)
-            if not (inside and valid and ray > self.safe_front_m):
-                continue
             # ``front_m`` is deliberately the minimum of the ±20 degree
             # body-leading beams.  A clear centre ray alone can pass a corner
             # that the 0.25 m circular body will clip, so it must never
             # authorize a straight recovery/bypass departure by itself.
-            if abs(offset) < 1e-9 and snapshot.front_m <= self.safe_front_m:
-                continue
-            if offset < 0.0 and snapshot.right_m < self.turn_side_clearance_m:
-                continue
-            if offset > 0.0 and snapshot.left_m < self.turn_side_clearance_m:
-                continue
-            candidates.append((abs(_wrap(error - offset)), offset))
-        if not candidates:
-            scout.blocked_count += 1
-            scout.bypass_departure_steps = max(
-                scout.bypass_departure_steps, self.bypass_departure_step_count
-            )
-            return self._begin_clear_side_turn(
-                scout, snapshot, "RETURN_LOCAL_ARBITRATION_TURN_45"
-            )
-        _, offset = min(candidates, key=lambda item: item[0])
-        if abs(offset) < 1e-9:
-            if abs(error) <= math.radians(22.5):
-                scout.bypass_active = False
-                scout.escape_direction = 0.0
-                return None
-            return self.linear_speed_mps, 0.0, "RETURN_BYPASS_FORWARD"
-        direction = 1.0 if offset > 0.0 else -1.0
-        scout.escape_direction = direction
-        self._start_turn(
-            scout, direction,
-            "RETURN_LOCAL_ARBITRATION_TURN_45",
-        )
-        # Finish this one locally safe maneuver before asking the nest cue to
-        # arbitrate again.  Without a bounded departure, two adjacent
-        # headings can each nominate the other 45-degree heading and create
-        # an in-place -90/-135 degree flip-flop.  This is current actuator
-        # state, cleared after the departure, not obstacle or route memory.
-        scout.bypass_departure_steps = max(
-            scout.bypass_departure_steps, self.bypass_departure_step_count
-        )
-        return self._continue_turn(scout)
-
     def _contact_recovery_command(self, scout: ScoutState, snapshot) -> tuple[float, float, str]:
         """Bounded stateless recovery after simulator contact/no-progress.
 
@@ -514,73 +465,68 @@ class BaselineSwarmRunner:
             )
         return self.linear_speed_mps, 0.0, "EXPLORE_FORWARD"
 
-    def _return_command(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str]:
+    def _retired_return_policy(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str] | None:
         """Existing baseline's stateless home-vector policy, quantized to 45°.
 
         The fixed home pose is a common navigation infrastructure cue, not a
         remembered outbound route.  No previous branch, route, or trip result
         is consulted here.
         """
-        pose = snapshot.pose
-        if scout.recovery_stage:
-            return self._contact_recovery_command(scout, snapshot)
-        bypass = self._return_bypass_command(scout, snapshot, sensor)
-        if bypass is not None:
-            return bypass
-        home_error = math.hypot(pose.x_m - scout.home.x_m, pose.y_m - scout.home.y_m)
-        if home_error <= self.nest_delivery_radius_m:
-            scout.phase = "DELIVER"
-            return 0.0, 0.0, "NEST_REACHED"
-        if scout.escape_direction != 0.0:
-            return self._obstacle_escape_command(scout, snapshot)
-        if scout.turn_remaining_rad:
-            return self._continue_turn(scout)
-        desired = math.atan2(scout.home.y_m - pose.y_m, scout.home.x_m - pose.x_m)
-        heading_error = _wrap(desired - pose.theta_rad)
-        if abs(heading_error) > math.radians(22.5):
-            direction = 1.0 if heading_error > 0.0 else -1.0
-            turn_side_clearance = snapshot.left_m if direction > 0.0 else snapshot.right_m
-            home_ray, _, home_inside_fov, home_ray_valid = sensor.ray_distance(heading_error)
+        # The exact-bearing implementation is deliberately unreachable in C1.
+        return None
             # An outside-FOV home bearing is not an obstacle observation.  A
             # prior implementation treated it as one, entering bypass even in
             # open space and forcing a long departure away from the Nest.
             # Rotate one body-safe 45-degree primitive to bring the cue into
             # the forward sensor field; only an *observed*, unsafe home ray
             # may invoke obstacle bypass.
-            home_ray_blocked = (
-                home_inside_fov
-                and (not home_ray_valid or home_ray <= self.safe_front_m)
-            )
-            if (
-                turn_side_clearance < self.turn_side_clearance_m
-                or home_ray_blocked
-            ):
-                scout.bypass_active = True
-                scout.escape_direction = 0.0
-                command = self._return_bypass_command(scout, snapshot, sensor)
-                if command is not None:
-                    return command
-                return self.linear_speed_mps, 0.0, "RETURN_HOME_VECTOR"
-            self._start_turn(scout, direction, "HOME_CUE_TURN_45")
+    def _return_command(
+        self, scout: ScoutState, snapshot, sensor, nest_rssi: float,
+    ) -> tuple[float, float, str]:
+        """Reactive return using only scalar RSSI feedback and local ToF.
+
+        The controller receives no Nest coordinates, vector, angle, or
+        distance.  ``previous_nest_rssi`` is one immediate sensor sample and
+        is discarded at the start of every new return episode.
+        """
+        if scout.recovery_stage:
+            return self._contact_recovery_command(scout, snapshot)
+        if scout.escape_direction != 0.0:
+            return self._obstacle_escape_command(scout, snapshot)
+        if scout.turn_remaining_rad:
             return self._continue_turn(scout)
         if snapshot.front_m <= self.safe_front_m:
             scout.blocked_count += 1
-            scout.bypass_active = True
-            scout.escape_direction = 0.0
-            command = self._return_bypass_command(scout, snapshot, sensor)
-            if command is not None:
-                return command
-            return self.linear_speed_mps, 0.0, "RETURN_HOME_VECTOR"
+            return self._obstacle_escape_command(scout, snapshot)
         if min(snapshot.left_m, snapshot.right_m) < self.turn_side_clearance_m:
-            scout.bypass_active = True
-            scout.escape_direction = 0.0
-            scout.bypass_departure_steps = 10
             return self._begin_clear_side_turn(
-                scout, snapshot, "RETURN_SIDE_CLEARANCE_ESCAPE_45"
+                scout, snapshot, "RETURN_RSSI_SIDE_CLEARANCE_ESCAPE_45"
             )
-        return self.linear_speed_mps, 0.0, "RETURN_HOME_VECTOR"
+        previous = scout.previous_nest_rssi
+        scout.previous_nest_rssi = nest_rssi
+        if previous is None or nest_rssi >= previous - 1e-6:
+            return self.linear_speed_mps, 0.0, "RETURN_RSSI_FORWARD"
+        # A weaker scalar has no left/right meaning. Choose only from current
+        # local ToF openings; equal sides use the seeded per-Scout RNG.
+        if snapshot.left_m > snapshot.right_m:
+            direction = 1.0
+        elif snapshot.right_m > snapshot.left_m:
+            direction = -1.0
+        else:
+            direction = 1.0 if scout.rng.random() < 0.5 else -1.0
+        self._start_turn(scout, direction, "RETURN_RSSI_DECLINE_TURN_45")
+        return self._continue_turn(scout)
 
-    def _command_for(self, scout: ScoutState, sensor: IRSimDirectionalRangeSensor) -> tuple[float, float, str, Any]:
+    def _environment_nest_reached(self, pose: RobotPose) -> bool:
+        """Environment event only; never exposed as a steering measurement."""
+        return math.hypot(
+            pose.x_m - self._nest_beacon.nest_x_m,
+            pose.y_m - self._nest_beacon.nest_y_m,
+        ) <= self.nest_delivery_radius_m
+
+    def _command_for(
+        self, scout: ScoutState, sensor: IRSimDirectionalRangeSensor,
+    ) -> tuple[float, float, str, Any, Any]:
         snapshot = sensor.read()
         reading = self.energy_sensor.read(snapshot.pose, sensor)
         if scout.phase == "EXPLORE":
@@ -592,6 +538,7 @@ class BaselineSwarmRunner:
                 scout.return_attempt_count += 1
                 scout.collected_at_s = float(self.env.time)
                 scout.phase = "RETURN_HOME"
+                scout.previous_nest_rssi = None
                 linear, angular, action = 0.0, 0.0, "COLLECT"
             else:
                 # The source is occupied by another physical carrier. Resume
@@ -599,7 +546,14 @@ class BaselineSwarmRunner:
                 scout.phase = "EXPLORE"
                 linear, angular, action = 0.0, 0.0, "RESOURCE_OCCUPIED"
         elif scout.phase == "RETURN_HOME":
-            linear, angular, action = self._return_command(scout, snapshot, sensor)
+            if self._environment_nest_reached(snapshot.pose):
+                scout.phase = "DELIVER"
+                linear, angular, action = 0.0, 0.0, "NEST_REACHED"
+            else:
+                nest_rssi = self._nest_beacon.sample(snapshot.pose)
+                linear, angular, action = self._return_command(
+                    scout, snapshot, sensor, nest_rssi
+                )
         elif scout.phase == "DELIVER":
             scout.delivery_count += 1
             scout.trip_rows.append({
@@ -608,6 +562,7 @@ class BaselineSwarmRunner:
             })
             scout.trip_distance_m = 0.0
             scout.collected_at_s = None
+            scout.previous_nest_rssi = None
             if self.resource_carrier_id == scout.scout_id:
                 self.resource_carrier_id = None
             scout.phase = (
@@ -621,7 +576,11 @@ class BaselineSwarmRunner:
             linear, angular, action = 0.0, 0.0, "DELIVER"
         else:
             linear, angular, action = 0.0, 0.0, "MISSION_COMPLETE"
-        return linear, angular, action, reading
+        # Reuse this exact current sensor frame for passive trajectory
+        # logging.  The previous second read occurred at the same simulated
+        # instant and did not affect control; removing it reduces wall-clock
+        # overhead without skipping any controller/sensor timestep.
+        return linear, angular, action, reading, snapshot
 
     @staticmethod
     def _behavioral_outcome(scout: ScoutState) -> str:
@@ -668,10 +627,10 @@ class BaselineSwarmRunner:
         for step in range(maximum_steps):
             commands, rows = [], []
             for scout, sensor in zip(self.scouts, self.sensors, strict=True):
-                linear, angular, action, reading = self._command_for(scout, sensor)
+                linear, angular, action, reading, snapshot = self._command_for(scout, sensor)
                 commands.append([linear, angular])
                 rows.append((
-                    scout, sensor.read(), reading, action, linear, angular,
+                    scout, snapshot, reading, action, linear, angular,
                     scout.recovery_stage,
                 ))
             action_ids = [self.env.objects.index(self.env.robot_list[i]) for i in range(self.scout_count)]
@@ -799,7 +758,7 @@ class BaselineSwarmRunner:
                     # it does not feed back into any controller decision.
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "RETURN_HOME_START",
-                                           "detail": "stateless_home_vector"})
+                                           "detail": "idealized_rssi_like_scalar_feedback"})
                 elif action == "NEST_REACHED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "NEST_REACHED",
@@ -905,10 +864,10 @@ class BaselineSwarmRunner:
             "mission_mode": self.mission_mode,
             "working_memory_enabled": False, "experience_memory_enabled": False,
             "hormone_enabled": False, "exchange_enabled": False, "shared_map_created": False,
-            "return_navigation": "STATELESS_HOME_VECTOR_COMMON_INFRASTRUCTURE",
+            "return_navigation": "RSSI_GRADIENT_LOCAL_REACTIVE_COMMON_INFRASTRUCTURE",
             "nest_cue_definition": (
-                "IDEALIZED_COMMON_STATELESS_NEST_HOMING_CUE; "
-                "instantaneous nest direction only; no route, history, map, or planner"
+                "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE; scalar signal only; "
+                "no position, distance, bearing, route, map, or planner"
             ),
             "local_45_degree_turn_enabled": True,
             "isolation_assertions": {

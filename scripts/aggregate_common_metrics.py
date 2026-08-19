@@ -45,7 +45,9 @@ def main() -> None:
             continue
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         run_id = run_dir.name
-        seed = run_id.rsplit("_", 1)[-1]
+        metadata_path = run_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        seed = metadata.get("configuration", {}).get("decision_random_seed", run_id)
         duration = f(summary.get("simulation_time_s"))
         events = read_csv(run_dir / "swarm_events.csv")
         trajectory = read_csv(run_dir / "swarm_trajectory.csv")
@@ -57,7 +59,8 @@ def main() -> None:
         by_scout: dict[str, list[dict[str, str]]] = defaultdict(list)
         for row in trajectory:
             by_scout[row["scout_id"]].append(row)
-        homes = {"0": (1.0, 1.0), "1": (1.8, 1.0), "2": (2.6, 1.0), "3": (3.35, 1.0)}
+        # Condition 1 uses one common Nest cue and one common physical nest.
+        homes = defaultdict(lambda: (1.0, 1.0))
         contributing = 0
         for item in summary.get("scouts", []):
             sid = str(item["scout_id"])
