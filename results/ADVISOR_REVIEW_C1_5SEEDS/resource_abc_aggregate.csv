@@ -1,0 +1,4 @@
+resource_id,detections,harvest_completions,delivered_energy,mean_harvest_duration_s
+A,9,9,0.0,40.0
+B,6,6,2.0,20.0
+C,2,2,0.0,10.0

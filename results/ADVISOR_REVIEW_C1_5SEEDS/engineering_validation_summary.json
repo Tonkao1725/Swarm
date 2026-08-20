@@ -1,0 +1,8 @@
+{
+  "classification": "PRELIMINARY_C1_ADVISOR_REVIEW_NOT_FINAL_RESEARCH_DATA",
+  "valid_runs": 5,
+  "invalid_runs": 0,
+  "contact_stall_runs": 0,
+  "contact_recovery_events": 12,
+  "stationary_deadlock_runs": 0
+}

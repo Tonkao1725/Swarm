@@ -1,0 +1,41 @@
+{
+  "scout_count": 3,
+  "horizon_s": 3600,
+  "nest_energy_target": 6,
+  "resources": {
+    "model_status": "PILOT_NORMALIZED_HARVEST_RATES_NOT_PHYSICAL_CALIBRATION",
+    "harvest_payload_target": 1.0,
+    "nest_energy_target": 6.0,
+    "robot_internal_energy_capacity": 3.0,
+    "robot_initial_internal_energy": 3.0,
+    "energy_cost_per_encoder_distance": 0.01,
+    "harvesting_rule": "carried_harvest_energy = min(payload_target, carried_harvest_energy + relative_harvest_rate * dt) while near-field and strict LOS are valid; otherwise accumulation pauses and retained energy remains carried.",
+    "sources": [
+      {
+        "resource_id": "A",
+        "x_m": 3.0,
+        "y_m": 3.0,
+        "distance_category": "near",
+        "relative_harvest_rate": 0.025
+      },
+      {
+        "resource_id": "B",
+        "x_m": 7.0,
+        "y_m": 7.0,
+        "distance_category": "medium",
+        "relative_harvest_rate": 0.05
+      },
+      {
+        "resource_id": "C",
+        "x_m": 11.875,
+        "y_m": 11.875,
+        "distance_category": "far",
+        "relative_harvest_rate": 0.1
+      }
+    ],
+    "persistent_sources": true,
+    "concurrent_harvesting_allowed": true,
+    "controller_information_boundary": "Solar Left/Center/Right, near-field harvest-valid state, current local obstacle sensing. No resource x/y, distance, bearing, rate, quality, or source ranking."
+  },
+  "mission": "research; success requires net Nest Energy >= target"
+}

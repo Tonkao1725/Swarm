@@ -1,0 +1,16 @@
+research_id,seed,scout_id,phase_at_termination,completed_trip_count,started_trip_count,completed_cycle_count,active_cycle_id,behavioral_outcome,resource_found_count,collection_count,delivery_count,internal_energy_final,internal_energy_min,nest_withdrawn_energy,depleted,distance_m,coverage_cells_0_5m,diagonal_turn_count,blocked_turn_count,blocked_sensor_samples,contact_stalled,contact_recovery_count,persistent_stationary_turn_deadlock,max_consecutive_stationary_rotation_steps,reactive_oscillation_warning
+R01,82784102,0,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,277.4639999999543,181,411,235,220,False,1,False,36,False
+R01,82784102,1,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,279.2899999999536,337,379,205,193,False,2,False,27,False
+R01,82784102,2,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,280.2799999999532,310,359,197,187,False,0,False,36,False
+R02,98386804,0,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,273.3939999999559,301,484,256,236,False,0,False,36,False
+R02,98386804,1,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,275.1539999999552,237,453,251,237,False,1,False,54,False
+R02,98386804,2,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,275.1539999999552,250,453,254,234,False,2,False,36,False
+R03,358777504,0,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,274.9339999999553,201,457,275,242,False,1,False,36,False
+R03,358777504,1,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,274.1859999999556,274,471,266,253,False,1,False,36,False
+R03,358777504,2,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,266.7499999999585,286,607,397,306,False,2,False,36,False
+R04,385197017,0,DEPLETED,1,2,1,2,TIME_LIMIT_REACHED,2,2,1,0.0,0.0,1.0,True,366.3659999999194,283,613,333,306,False,1,False,36,False
+R04,385197017,1,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,275.2199999999552,300,451,275,244,False,0,False,36,False
+R04,385197017,2,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,277.6839999999542,163,407,228,219,False,1,False,36,False
+R05,413997162,0,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,274.6039999999554,286,462,272,246,False,0,False,36,False
+R05,413997162,1,DEPLETED,1,2,1,2,TIME_LIMIT_REACHED,2,2,1,0.0,0.0,1.0,True,363.8359999999204,237,658,370,330,False,0,False,36,False
+R05,413997162,2,DEPLETED,0,1,0,1,RETURN_FAILED,1,1,0,0.0,0.0,0.0,True,277.9039999999541,215,402,225,210,False,0,False,36,False

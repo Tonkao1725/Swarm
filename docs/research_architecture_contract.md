@@ -2,7 +2,7 @@
 
 Condition 1 is a three-Scout, independent, stateless reactive baseline in the original maze.
 
-- Research mode terminates with `MISSION_SUCCESS` only when cumulative Nest Energy reaches 6; otherwise its 3600 s global horizon yields `TIME_LIMIT_REACHED`.
+- Research mode terminates with `MISSION_SUCCESS` only when cumulative Nest Energy reaches 6. It terminates immediately with `COLONY_FAILURE_ALL_DEPLETED` only when no Scout has a valid future recharge, delivery, or other energy-changing action; otherwise its 3600 s global horizon yields `TIME_LIMIT_REACHED`.
 - One valid delivery adds one Nest Energy unit. A delivery completes one foraging episode, starts the delivering Scout's next trip, and does not stop the colony before the target.
 - Working Memory, Experience Memory, Exchange, AIH, shared maps, route storage, breadcrumbs, visited-branch memory, and planners are OFF.
 - Exploration receives nominal local ToF and solar L/C/R resource sensing. The Resource coordinate is available only to the environment/sensor implementation.

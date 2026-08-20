@@ -1,0 +1,5 @@
+research_id,seed,run_id,timestamp,scout_id,event_type,previous_energy,delivered_energy,withdrawal_energy,new_energy,gross_delivered_energy,target
+R04,385197017,R04_seed385197017_3600s,1045.5,0,DELIVERY,0.0,1.0,0.0,1.0,1.0,6
+R04,385197017,R04_seed385197017_3600s,1045.5,0,ROBOT_RECHARGE_WITHDRAWAL,1.0,0.0,1.0,0.0,1.0,6
+R05,413997162,R05_seed413997162_3600s,960.7,1,DELIVERY,0.0,1.0,0.0,1.0,1.0,6
+R05,413997162,R05_seed413997162_3600s,960.7,1,ROBOT_RECHARGE_WITHDRAWAL,1.0,0.0,1.0,0.0,1.0,6

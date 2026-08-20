@@ -1,0 +1,21 @@
+research_id,seed,source_file,columns_used,purpose
+R01,82784102,swarm_events.csv,"sim_time_s, scout_id, trip_id, event, detail","depletion, energy-source, return, delivery, withdrawal events"
+R01,82784102,swarm_trajectory.csv,"sim_time_s, scout_id, phase",real state-duration reconstruction up to effective termination
+R01,82784102,robot_energy_timeline.csv,"sim_time_s, scout_id, internal_energy, phase",internal-energy/depletion verification
+R01,82784102,nest_energy_timeline.csv,"timestamp, scout_id, event_type, delivered_energy, withdrawal_energy, new_energy",Nest energy accounting and withdrawal timing
+R02,98386804,swarm_events.csv,"sim_time_s, scout_id, trip_id, event, detail","depletion, energy-source, return, delivery, withdrawal events"
+R02,98386804,swarm_trajectory.csv,"sim_time_s, scout_id, phase",real state-duration reconstruction up to effective termination
+R02,98386804,robot_energy_timeline.csv,"sim_time_s, scout_id, internal_energy, phase",internal-energy/depletion verification
+R02,98386804,nest_energy_timeline.csv,"timestamp, scout_id, event_type, delivered_energy, withdrawal_energy, new_energy",Nest energy accounting and withdrawal timing
+R03,358777504,swarm_events.csv,"sim_time_s, scout_id, trip_id, event, detail","depletion, energy-source, return, delivery, withdrawal events"
+R03,358777504,swarm_trajectory.csv,"sim_time_s, scout_id, phase",real state-duration reconstruction up to effective termination
+R03,358777504,robot_energy_timeline.csv,"sim_time_s, scout_id, internal_energy, phase",internal-energy/depletion verification
+R03,358777504,nest_energy_timeline.csv,"timestamp, scout_id, event_type, delivered_energy, withdrawal_energy, new_energy",Nest energy accounting and withdrawal timing
+R04,385197017,swarm_events.csv,"sim_time_s, scout_id, trip_id, event, detail","depletion, energy-source, return, delivery, withdrawal events"
+R04,385197017,swarm_trajectory.csv,"sim_time_s, scout_id, phase",real state-duration reconstruction up to effective termination
+R04,385197017,robot_energy_timeline.csv,"sim_time_s, scout_id, internal_energy, phase",internal-energy/depletion verification
+R04,385197017,nest_energy_timeline.csv,"timestamp, scout_id, event_type, delivered_energy, withdrawal_energy, new_energy",Nest energy accounting and withdrawal timing
+R05,413997162,swarm_events.csv,"sim_time_s, scout_id, trip_id, event, detail","depletion, energy-source, return, delivery, withdrawal events"
+R05,413997162,swarm_trajectory.csv,"sim_time_s, scout_id, phase",real state-duration reconstruction up to effective termination
+R05,413997162,robot_energy_timeline.csv,"sim_time_s, scout_id, internal_energy, phase",internal-energy/depletion verification
+R05,413997162,nest_energy_timeline.csv,"timestamp, scout_id, event_type, delivered_energy, withdrawal_energy, new_energy",Nest energy accounting and withdrawal timing

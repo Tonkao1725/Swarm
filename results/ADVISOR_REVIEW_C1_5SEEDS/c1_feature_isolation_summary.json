@@ -1,0 +1,9 @@
+{
+  "working_memory": "OFF",
+  "experience_memory": "OFF",
+  "experience_exchange": "OFF",
+  "artificial_internal_hormone": "OFF",
+  "shared_map_or_route": "OFF",
+  "rssi_navigation": "OFF; confirmation only at physical Nest arrival",
+  "internal_energy": "common physical constraint; not adaptive decision input"
+}

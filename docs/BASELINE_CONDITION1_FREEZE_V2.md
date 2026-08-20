@@ -80,6 +80,10 @@ the global horizon, and `TIME_LIMIT_REACHED`.
 - Nest Energy target: 6 units
 - One valid `DELIVER`: +1 Nest Energy unit
 - Mission success: cumulative Nest Energy >= 6
+- `COLONY_FAILURE_ALL_DEPLETED`: immediate absorbing failure only when every
+  Scout is permanently unable to recharge, deliver, or take any future
+  energy-changing action. A depleted Scout physically at the Nest while Nest
+  Energy remains is recoverable and does not trigger this condition.
 - Otherwise termination: `TIME_LIMIT_REACHED` at the global horizon
 - `FORAGING_TRIPS`: development-only tooling; never a Research Mode stop rule
 - After a delivery before target: `NEXT_TRIP_START → EXPLORE`; all Scouts

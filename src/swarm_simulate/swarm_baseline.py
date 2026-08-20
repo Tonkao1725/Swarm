@@ -646,6 +646,51 @@ class BaselineSwarmRunner:
             return "NO_SUCCESSFUL_DELIVERY"
         return "RESOURCE_NOT_FOUND"
 
+    def _depleted_scout_can_be_restored(self, scout: ScoutState) -> bool:
+        """Whether the currently physical C1 Nest mechanism can revive Scout.
+
+        This is a termination predicate, not a controller/navigation input.
+        A zero-energy body at the Nest is not stranded while common Nest
+        Energy can still perform the fixed maintenance recharge.
+        """
+        return (
+            scout.phase == "DEPLETED"
+            and self.nest_energy > 1e-12
+            and self._environment_nest_reached(self._pose(self.env, scout.scout_id))
+        )
+
+    def _nest_target_reached(self) -> bool:
+        """Numerically stable research-target comparison."""
+        return self.nest_energy + 1e-12 >= float(self.nest_energy_target)
+
+    def _colony_failure_all_depleted(self) -> bool:
+        """True only when no Scout has any valid future energy-changing action."""
+        for scout in self.scouts:
+            if scout.phase not in {"DEPLETED", "COMPLETE"}:
+                # An active Scout can still explore, return with payload, or
+                # deliver; another Scout at zero energy does not end Colony.
+                return False
+            if self._depleted_scout_can_be_restored(scout):
+                return False
+        return True
+
+    def _termination_state_snapshot(
+        self,
+        last_meaningful_event_time_s: float,
+        last_active_scout_id: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "nest_energy": self.nest_energy,
+            "last_meaningful_event_time_s": last_meaningful_event_time_s,
+            "last_active_scout_id": last_active_scout_id,
+            "scouts": [{
+                "scout_id": scout.scout_id, "phase": scout.phase,
+                "internal_energy": scout.internal_energy,
+                "carried_payload": scout.carried_harvest_energy,
+                "last_active": scout.phase not in {"DEPLETED", "COMPLETE"},
+            } for scout in self.scouts],
+        }
+
     def run(self) -> dict[str, Any]:
         trajectory = (self.run_dir / "swarm_trajectory.csv").open("w", newline="", encoding="utf-8")
         event_file = (self.run_dir / "swarm_events.csv").open("w", newline="", encoding="utf-8")
@@ -683,8 +728,66 @@ class BaselineSwarmRunner:
         maximum_steps = int(math.ceil(self.duration_s / self.env.step_time))
         mission_complete = False
         target_reached_time_s: float | None = None
-        termination_reason = "EXPERIMENT_HORIZON_REACHED"
+        termination_time_s: float | None = None
+        last_meaningful_event_time_s = 0.0
+        last_active_scout_id: int | None = None
+        termination_reason = "TIME_LIMIT_REACHED"
         for step in range(maximum_steps):
+            # The completed colony target is absorbing and has priority over
+            # recovery/depletion handling in the same state.
+            if self.mission_mode == "research" and self._nest_target_reached():
+                mission_complete = True
+                target_reached_time_s = round(float(self.env.time), 6)
+                termination_time_s = target_reached_time_s
+                termination_reason = "NEST_ENERGY_TARGET_REACHED"
+                event_writer.writerow({"sim_time_s": target_reached_time_s, "scout_id": "COLONY",
+                                       "trip_id": "", "event": "MISSION_COMPLETE",
+                                       "detail": f"nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}; termination_reason=NEST_ENERGY_TARGET_REACHED"})
+                break
+            for scout in self.scouts:
+                if (
+                    scout.internal_energy <= 1e-12
+                    and scout.phase not in {"COMPLETE", "CONTACT_STALLED", "DEPLETED", "DELIVER"}
+                    and not (
+                        scout.phase == "RETURN_HOME"
+                        and scout.carried_harvest_energy > 0.0
+                        and self._environment_nest_reached(self._pose(self.env, scout.scout_id))
+                    )
+                ):
+                    scout.depleted = True
+                    scout.phase = "DEPLETED"
+            # A depleted Scout exactly inside the physical Nest region may be
+            # restored by the fixed common recharge mechanism.  This is not a
+            # strategic decision and prevents a false ALL_DEPLETED outcome.
+            for scout in self.scouts:
+                if not self._depleted_scout_can_be_restored(scout):
+                    continue
+                withdrawal = min(
+                    self.internal_energy_capacity - scout.internal_energy,
+                    self.nest_energy,
+                )
+                if withdrawal <= 0.0:
+                    continue
+                before = self.nest_energy
+                self.nest_energy -= withdrawal
+                self.total_nest_withdrawal += withdrawal
+                scout.internal_energy += withdrawal
+                scout.nest_withdrawn_energy += withdrawal
+                scout.depleted = False
+                scout.phase = "EXPLORE"
+                now = round(float(self.env.time), 6)
+                event_writer.writerow({"sim_time_s": now, "scout_id": scout.scout_id,
+                                       "trip_id": scout.trip_id, "event": "NEST_ENERGY_WITHDRAWAL",
+                                       "detail": f"withdrawal={withdrawal:.6f}; net_nest_energy={self.nest_energy:.6f}; robot_energy={scout.internal_energy:.6f}; restored_from_depleted=true"})
+                energy_timeline_writer.writerow({
+                    "run_id": self.run_dir.name, "seed": self.seed, "timestamp": now,
+                    "scout_id": scout.scout_id, "event_type": "ROBOT_RECHARGE_WITHDRAWAL",
+                    "previous_energy": before, "delivered_energy": 0.0,
+                    "withdrawal_energy": withdrawal, "new_energy": self.nest_energy,
+                    "gross_delivered_energy": self.gross_delivered_energy,
+                    "target": self.nest_energy_target,
+                })
+                last_meaningful_event_time_s = now
             commands, rows = [], []
             for scout, sensor in zip(self.scouts, self.sensors, strict=True):
                 linear, angular, action, reading, snapshot = self._command_for(scout, sensor)
@@ -693,6 +796,8 @@ class BaselineSwarmRunner:
                     scout, snapshot, reading, action, linear, angular,
                     scout.recovery_stage,
                 ))
+                if scout.phase not in {"DEPLETED", "COMPLETE"}:
+                    last_active_scout_id = scout.scout_id
             action_ids = [self.env.objects.index(self.env.robot_list[i]) for i in range(self.scout_count)]
             self.env.step(commands, action_id=action_ids)
             for scout, snapshot, reading, action, linear, angular, recovery_stage in rows:
@@ -707,7 +812,7 @@ class BaselineSwarmRunner:
                 scout.internal_energy = max(0.0, scout.internal_energy - self.energy_cost_per_encoder_distance * wheel_path_delta)
                 scout.minimum_internal_energy = min(scout.minimum_internal_energy, scout.internal_energy)
                 robot_depleted_started = False
-                if scout.internal_energy <= 1e-12 and scout.phase not in {"COMPLETE", "CONTACT_STALLED", "DEPLETED"}:
+                if scout.internal_energy <= 1e-12 and scout.phase not in {"COMPLETE", "CONTACT_STALLED", "DEPLETED", "DELIVER"}:
                     scout.depleted = True
                     scout.phase = "DEPLETED"
                     robot_depleted_started = True
@@ -866,7 +971,7 @@ class BaselineSwarmRunner:
                     # Delivery has priority. Only if the target remains
                     # unreached may this no-AIH Scout refill from the common
                     # Nest for its next exploratory cycle.
-                    if self.nest_energy < self.nest_energy_target:
+                    if not self._nest_target_reached():
                         required = max(0.0, self.internal_energy_capacity - scout.internal_energy)
                         withdrawal = min(required, self.nest_energy)
                         if withdrawal > 0.0:
@@ -886,7 +991,7 @@ class BaselineSwarmRunner:
                                 "gross_delivered_energy": self.gross_delivered_energy,
                                 "target": self.nest_energy_target,
                             })
-                    if scout.phase == "EXPLORE" and self.nest_energy < self.nest_energy_target:
+                    if scout.phase == "EXPLORE" and not self._nest_target_reached():
                         event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                                "trip_id": scout.trip_id, "event": "NEXT_CYCLE_START",
                                                "detail": f"cycle_id={scout.cycle_id}; memory_free_reactive_explore"})
@@ -906,17 +1011,32 @@ class BaselineSwarmRunner:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "CONTACT_RECOVERY_RETRY",
                                            "detail": "first recovery moved but collision persisted; one final fresh-LiDAR maneuver"})
+                if action in {
+                    "RESOURCE_LIGHT_DETECTED", "HARVEST_COMPLETE", "NEST_REACHED", "DELIVER",
+                    "CONTACT_RECOVERY_START", "CONTACT_RECOVERY_RETRY", "CONTACT_RECOVERY_COMPLETE",
+                } or robot_depleted_started:
+                    last_meaningful_event_time_s = round(float(self.env.time), 6)
             if self.render_enabled and step % 3 == 0:
                 self.env.render()
                 self._draw_energy_marker()
                 self._draw_scout_heading_markers()
-            if self.mission_mode == "research" and self.nest_energy >= self.nest_energy_target:
+            if self.mission_mode == "research" and self._nest_target_reached():
                 mission_complete = True
                 target_reached_time_s = round(float(self.env.time), 6)
+                termination_time_s = target_reached_time_s
                 termination_reason = "NEST_ENERGY_TARGET_REACHED"
                 event_writer.writerow({"sim_time_s": target_reached_time_s, "scout_id": "COLONY",
                                        "trip_id": "", "event": "MISSION_COMPLETE",
                                        "detail": f"nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}; termination_reason=NEST_ENERGY_TARGET_REACHED"})
+                break
+            if self.mission_mode == "research" and self._colony_failure_all_depleted():
+                mission_complete = True
+                termination_time_s = round(float(self.env.time), 6)
+                termination_reason = "COLONY_FAILURE_ALL_DEPLETED"
+                state = self._termination_state_snapshot(last_meaningful_event_time_s, last_active_scout_id)
+                event_writer.writerow({"sim_time_s": termination_time_s, "scout_id": "COLONY",
+                                       "trip_id": "", "event": "COLONY_FAILURE_ALL_DEPLETED",
+                                       "detail": json.dumps(state, sort_keys=True)})
                 break
             if self.mission_mode == "trip_limited" and all(s.phase == "COMPLETE" for s in self.scouts):
                 mission_complete = True
@@ -924,9 +1044,10 @@ class BaselineSwarmRunner:
                 break
 
         if self.mission_mode == "research" and not mission_complete:
+            termination_time_s = round(float(self.env.time), 6)
             event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": "COLONY",
                                    "trip_id": "", "event": "EXPERIMENT_TERMINATED",
-                                   "detail": f"reason=EXPERIMENT_HORIZON_REACHED; nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}"})
+                                   "detail": f"reason=TIME_LIMIT_REACHED; nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}"})
         for scout in self.scouts:
             for row in scout.trip_rows:
                 trip_writer.writerow({"scout_id": scout.scout_id, **row})
@@ -939,12 +1060,13 @@ class BaselineSwarmRunner:
             s.persistent_stationary_turn_deadlock for s in self.scouts
         )
         if self.mission_mode == "research" and not mission_complete:
-            termination_reason = "EXPERIMENT_HORIZON_REACHED"
+            termination_reason = "TIME_LIMIT_REACHED"
         result = {
             "status": "COMPLETED",
             "engineering_status": "COMPLETED",
             "mission_outcome": (
-                "MISSION_SUCCESS" if self.mission_mode == "research" and mission_complete
+                "MISSION_SUCCESS" if self.mission_mode == "research" and termination_reason == "NEST_ENERGY_TARGET_REACHED"
+                else "COLONY_FAILURE_ALL_DEPLETED" if self.mission_mode == "research" and termination_reason == "COLONY_FAILURE_ALL_DEPLETED"
                 else "TIME_LIMIT_REACHED" if self.mission_mode == "research"
                 else "SUCCESS" if all_complete else ("NO_SUCCESSFUL_DELIVERY" if delivered == 0 else "TIME_LIMIT_REACHED")
             ),
@@ -963,9 +1085,12 @@ class BaselineSwarmRunner:
             "total_robot_nest_withdrawal": self.total_nest_withdrawal,
             "net_nest_energy": self.nest_energy,
             "nest_energy_target": self.nest_energy_target,
-            "target_reached": mission_complete if self.mission_mode == "research" else None,
+            "target_reached": termination_reason == "NEST_ENERGY_TARGET_REACHED" if self.mission_mode == "research" else None,
             "target_reached_time_s": target_reached_time_s,
             "termination_reason": termination_reason,
+            "termination_time_s": termination_time_s,
+            "last_meaningful_event_time_s": last_meaningful_event_time_s,
+            "termination_state": self._termination_state_snapshot(last_meaningful_event_time_s, last_active_scout_id),
             "mission_mode": self.mission_mode,
             "working_memory_enabled": False, "experience_memory_enabled": False,
             "hormone_enabled": False, "exchange_enabled": False, "shared_map_created": False,

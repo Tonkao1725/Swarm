@@ -1,0 +1,6 @@
+research_id,seed,raw_duration_s,effective_termination_s,depleted_scouts,return_attempts,nest_reaches,deliveries,withdrawal_events,gross_delivered_energy,nest_energy_withdrawn,final_net_nest_energy,gross_delivery_rate_per_s,net_nest_energy_rate_per_s
+R01,82784102,3600.0,1670.7,3,3,0,0,0,0.0,0.0,0.0,0.0,0.0
+R02,98386804,3600.0,1718.4,3,3,0,0,0,0.0,0.0,0.0,0.0,0.0
+R03,358777504,3600.0,1767.9,3,3,0,0,0,0.0,0.0,0.0,0.0,0.0
+R04,385197017,3600.0,2246.9,3,4,1,1,1,1.0,1.0,0.0,0.00044505763496372776,0.0
+R05,413997162,3600.0,2306.4,3,4,1,1,1,1.0,1.0,0.0,0.0004335761359694762,0.0

@@ -24,6 +24,9 @@ def main() -> int:
     tag = os.environ["C1_RESEARCH_TAG"]
     root = PROJECT_ROOT / "results" / label
     resume_from = int(os.environ.get("C1_RESEARCH_RESUME_FROM", "1"))
+    max_runs = int(os.environ.get("C1_RESEARCH_MAX_RUNS", str(len(SEEDS))))
+    if not 1 <= max_runs <= len(SEEDS):
+        raise ValueError(f"C1_RESEARCH_MAX_RUNS must be between 1 and {len(SEEDS)}")
     if resume_from == 1:
         root.mkdir(parents=True, exist_ok=False)
         completed: list[dict[str, object]] = []
@@ -35,7 +38,7 @@ def main() -> int:
         completed = list(prior.get("completed_runs", []))
         if len(completed) != resume_from - 1 or not all(row.get("valid") for row in completed):
             raise RuntimeError("Resume point does not match an all-valid prior prefix")
-    for index, seed in enumerate(SEEDS[resume_from - 1:], start=resume_from):
+    for index, seed in enumerate(SEEDS[resume_from - 1:max_runs], start=resume_from):
         suffix = "_rerun" if index == resume_from and resume_from > 1 else ""
         run_id = f"R{index:02d}{suffix}_seed{seed}_3600s"
         run_dir = root / run_id

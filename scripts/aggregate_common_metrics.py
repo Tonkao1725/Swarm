@@ -149,7 +149,16 @@ def main() -> None:
     specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_episode.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition), ("resource_utilization_by_source.csv", resource_utilization)]
     for name, rows in specs:
         write_csv(output / name, rows, list(rows[0]) if rows else [])
-    (output / "baseline_research_summary.json").write_text(json.dumps({"run_count": len(research), "valid_run_count": sum(row["experimental_validity"] == "VALID" for row in research), "mission_success_count": sum(row["mission_outcome"] == "MISSION_SUCCESS" for row in research)}, indent=2), encoding="utf-8")
+    outcome_counts = {
+        "mission_success_count": sum(row["mission_outcome"] == "MISSION_SUCCESS" for row in research),
+        "colony_failure_all_depleted_count": sum(row["mission_outcome"] == "COLONY_FAILURE_ALL_DEPLETED" for row in research),
+        "time_limit_reached_count": sum(row["mission_outcome"] == "TIME_LIMIT_REACHED" for row in research),
+    }
+    (output / "baseline_research_summary.json").write_text(json.dumps({
+        "run_count": len(research),
+        "valid_run_count": sum(row["experimental_validity"] == "VALID" for row in research),
+        **outcome_counts,
+    }, indent=2), encoding="utf-8")
     definitions = PROJECT_ROOT / "docs" / "metric_definitions.json"
     (output / "metric_definitions.json").write_text(
         definitions.read_text(encoding="utf-8"), encoding="utf-8"

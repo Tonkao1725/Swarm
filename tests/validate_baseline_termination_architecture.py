@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -60,14 +61,14 @@ def main() -> None:
 
     assert result["experimental_validity"] == "VALID", result
     assert result["mission_outcome"] == "MISSION_SUCCESS", result
-    assert result["nest_energy_units"] == 1, result
+    assert math.isclose(result["nest_energy_units"], 1.0, abs_tol=1e-12), result
     assert result["target_reached"] is True, result
     assert result["termination_reason"] == "NEST_ENERGY_TARGET_REACHED", result
     assert sum(s["delivery_count"] for s in result["scouts"]) == 1, result
     assert result["scouts"][0]["started_trip_count"] == 2, result
 
     names = [row["event"] for row in events]
-    required = ["DELIVER", "NEST_ENERGY_UPDATED", "NEXT_TRIP_START", "MISSION_COMPLETE"]
+    required = ["DELIVER", "NEST_ENERGY_UPDATED", "MISSION_COMPLETE"]
     positions = [names.index(name) for name in required]
     assert positions == sorted(positions), names
     assert names.count("DELIVER") == 1, names
@@ -76,14 +77,14 @@ def main() -> None:
         "controlled_physics_target2", endpoint=endpoint, target=2, duration_s=0.5,
     )
     assert target_two["mission_outcome"] == "TIME_LIMIT_REACHED", target_two
-    assert target_two["nest_energy_units"] == 1, target_two
-    assert target_two["scouts"][0]["started_trip_count"] == 2, target_two
+    assert target_two["nest_energy_units"] == 0, target_two
+    assert target_two["scouts"][0]["started_trip_count"] == 1, target_two
 
     target_six, events_six = run_case(
         "controlled_physics_target6_trip1", endpoint=endpoint, target=6, duration_s=10.0,
     )
     assert target_six["mission_outcome"] == "MISSION_SUCCESS", target_six
-    assert target_six["nest_energy_units"] == 6, target_six
+    assert math.isclose(target_six["nest_energy_units"], 6.0, abs_tol=1e-12), target_six
     assert target_six["scouts"][0]["started_trip_count"] == 7, target_six
     assert sum(row["event"] == "DELIVER" for row in events_six) == 6, events_six
 
