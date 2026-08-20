@@ -37,22 +37,25 @@ def main() -> int:
     forbidden_attrs = {"nest_x_m", "nest_y_m", "home", "x_m", "y_m"}
     assert not (return_names & forbidden_names), return_names & forbidden_names
     assert not (return_attrs & forbidden_attrs), return_attrs & forbidden_attrs
-    assert "sample" not in return_attrs, "RSSI must be supplied as a scalar argument"
+    assert "sample" not in return_attrs, "RSSI must not steer RETURN_HOME"
     assert "_environment_nest_reached" in attributes(command_method)
-    assert "_nest_beacon" in attributes(command_method)
     assert "ray_distance" in attributes(forward_safety)
     assert "math.pi / 4.0" in (ast.get_source_segment(SOURCE.read_text(encoding="utf-8"), forward_safety) or "")
     source_text = SOURCE.read_text(encoding="utf-8")
     active_span = ast.get_source_segment(source_text, return_method) or ""
-    for forbidden in ("atan2(", "home.", "nest_x_m", "nest_y_m", "ray_distance("):
+    for forbidden in ("atan2(", "home.", "nest_x_m", "nest_y_m", "ray_distance(", "rssi", "sample("):
         assert forbidden not in active_span, forbidden
+    arrival_method = method(tree, "_environment_nest_reached")
+    arrival_span = ast.get_source_segment(source_text, arrival_method) or ""
+    assert "physical_entry" in arrival_span
+    assert ".sample(" in arrival_span
     assert "energy_sensor.active_endpoint.x_m" not in ast.get_source_segment(source_text, method(tree, "_explore_command"))
     report = {
         "classification": "NOT_RESEARCH_DATA",
         "nest_information_boundary": {
-            "active_return_controller": "RSSI scalar + current ToF + current actuator state + seeded RNG",
+            "active_return_controller": "current ToF + current actuator state + seeded RNG; no RSSI steering",
             "exact_nest_geometry_in_active_return": False,
-            "environment_arrival_check": "_environment_nest_reached only",
+            "environment_arrival_check": "physical Nest entry plus RSSI confirmation only",
         },
         "resource_information_boundary": {
             "active_explore_controller": "EnergyReading solar L/C/R and detected state only",

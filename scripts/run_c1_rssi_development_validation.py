@@ -1,4 +1,4 @@
-"""Run the three gated C1 RSSI development validations in isolated processes."""
+"""Run the three gated canonical-C1 development validations safely."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -14,7 +14,7 @@ SEEDS = (2118334751, 652974033, 920265301)
 
 
 def run_one(root: Path, seed: int, duration_s: float) -> dict[str, object]:
-    run_id = f"seed{seed}_rssi_3600s"
+    run_id = f"seed{seed}_canonical_c1_3600s"
     run_dir = root / run_id
     env = os.environ.copy()
     env.update({
@@ -32,15 +32,23 @@ def run_one(root: Path, seed: int, duration_s: float) -> dict[str, object]:
     (run_dir / "console_stderr.txt").write_text(process.stderr, encoding="utf-8")
     summary_path = run_dir / "swarm_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
-    valid = (process.returncode == 0 and summary.get("engineering_status") == "COMPLETED"
-             and summary.get("experimental_validity") == "VALID")
+    valid = (
+        process.returncode == 0
+        and summary.get("engineering_status") == "COMPLETED"
+        and summary.get("experimental_validity") == "VALID"
+        and summary.get("mission_mode") == "research"
+        and summary.get("nest_energy_target") == 6
+        and summary.get("return_navigation") == "STATELESS_LOCAL_REACTIVE_NO_RSSI_STEERING"
+        and not any(scout.get("contact_stalled") for scout in summary.get("scouts", []))
+        and not any(scout.get("persistent_stationary_turn_deadlock") for scout in summary.get("scouts", []))
+    )
     return {"seed": seed, "run_id": run_id, "returncode": process.returncode,
             "valid": valid, "summary": summary}
 
 
 def main() -> int:
     duration_s = float(os.environ.get("C1_DEVELOPMENT_DURATION_S", "3600"))
-    label = os.environ.get("C1_DEVELOPMENT_LABEL", "c1_rssi_development_validation_20260819")
+    label = os.environ.get("C1_DEVELOPMENT_LABEL", "canonical_c1_development_validation_20260820")
     root = ROOT / "results" / label
     root.mkdir(parents=True, exist_ok=False)
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(SEEDS)) as executor:

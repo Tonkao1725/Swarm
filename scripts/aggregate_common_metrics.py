@@ -38,6 +38,7 @@ def main() -> None:
     root, output = Path(sys.argv[1]), Path(sys.argv[2])
     output.mkdir(parents=True, exist_ok=True)
     research, scouts, episodes, returns, energy, funnel, coverage, trips, rates, repetition = ([] for _ in range(10))
+    resource_utilization: list[dict] = []
 
     for run_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         summary_path = run_dir / "swarm_summary.json"
@@ -52,8 +53,12 @@ def main() -> None:
         events = read_csv(run_dir / "swarm_events.csv")
         trajectory = read_csv(run_dir / "swarm_trajectory.csv")
         event_counts = Counter(row["event"] for row in events)
-        research.append({"run_id": run_id, "seed": seed, "engineering_status": summary.get("engineering_status"), "experimental_validity": summary.get("experimental_validity"), "mission_outcome": summary.get("mission_outcome"), "termination_reason": summary.get("termination_reason"), "actual_runtime_s": duration, "nest_energy_units": summary.get("nest_energy_units"), "nest_energy_target": summary.get("nest_energy_target"), "target_reached": summary.get("target_reached"), "target_reached_time_s": summary.get("target_reached_time_s"), "resource_detections": event_counts["RESOURCE_DETECTED"], "collections": event_counts["COLLECT"], "deliveries": event_counts["DELIVER"]})
-        rates.append({"run_id": run_id, "seed": seed, "actual_runtime_s": duration, "deliveries_per_1000s": 1000 * event_counts["DELIVER"] / duration if duration else 0.0, "nest_energy_gain_per_1000s": 1000 * f(summary.get("nest_energy_units")) / duration if duration else 0.0})
+        for row in events:
+            if row["event"] in {"RESOURCE_LIGHT_DETECTED", "HARVEST_COMPLETE"}:
+                resource_id = row["detail"].split(";")[0].replace("resource_id=", "")
+                resource_utilization.append({"run_id": run_id, "seed": seed, "scout_id": row["scout_id"], "trip_id": row["trip_id"], "resource_id": resource_id, "event": row["event"], "sim_time_s": row["sim_time_s"], "detail": row["detail"]})
+        research.append({"run_id": run_id, "seed": seed, "engineering_status": summary.get("engineering_status"), "experimental_validity": summary.get("experimental_validity"), "mission_outcome": summary.get("mission_outcome"), "termination_reason": summary.get("termination_reason"), "actual_runtime_s": duration, "gross_delivered_energy": summary.get("gross_delivered_energy"), "total_robot_nest_withdrawal": summary.get("total_robot_nest_withdrawal"), "net_nest_energy": summary.get("net_nest_energy"), "nest_energy_target": summary.get("nest_energy_target"), "target_reached": summary.get("target_reached"), "target_reached_time_s": summary.get("target_reached_time_s"), "resource_detections": event_counts["RESOURCE_LIGHT_DETECTED"], "harvest_completions": event_counts["HARVEST_COMPLETE"], "deliveries": event_counts["DELIVER"]})
+        rates.append({"run_id": run_id, "seed": seed, "actual_runtime_s": duration, "deliveries_per_1000s": 1000 * event_counts["DELIVER"] / duration if duration else 0.0, "net_nest_energy_gain_per_1000s": 1000 * f(summary.get("net_nest_energy")) / duration if duration else 0.0})
         energy.extend(read_csv(run_dir / "nest_energy_timeline.csv"))
 
         by_scout: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -78,9 +83,9 @@ def main() -> None:
             active_time = f(rows[-1]["sim_time_s"]) - f(rows[0]["sim_time_s"]) if len(rows) > 1 else 0.0
             distance = f(item.get("distance_m"))
             scoped_events = [row["event"] for row in events if row["scout_id"] == sid]
-            scouts.append({"run_id": run_id, "seed": seed, "scout_id": sid, "behavioral_outcome": item.get("behavioral_outcome"), "phase_at_termination": item.get("phase_at_termination"), "started_trip_count": item.get("started_trip_count"), "completed_trip_count": item.get("completed_trip_count"), "resource_found_count": item.get("resource_found_count"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count"), "total_distance_m": distance, "coverage_cells": len(cells), "actual_active_time_s": active_time, "contact_stalled": item.get("contact_stalled"), "return_arbitration_pathology": item.get("return_arbitration_pathology"), "wm_enabled": False, "em_enabled": False, "exchange_mode": "off", "aih_enabled": False, "aih_level": None, "aih_update_count": 0, "aih_influenced_decision_count": 0})
+            scouts.append({"run_id": run_id, "seed": seed, "scout_id": sid, "behavioral_outcome": item.get("behavioral_outcome"), "phase_at_termination": item.get("phase_at_termination"), "started_cycle_count": item.get("started_trip_count"), "completed_cycle_count": item.get("completed_cycle_count", item.get("completed_trip_count")), "resource_found_count": item.get("resource_found_count"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count"), "internal_energy_final": item.get("internal_energy_final"), "internal_energy_min": item.get("internal_energy_min"), "nest_withdrawn_energy": item.get("nest_withdrawn_energy"), "depleted": item.get("depleted"), "total_distance_m": distance, "coverage_cells": len(cells), "actual_active_time_s": active_time, "contact_stalled": item.get("contact_stalled"), "persistent_stationary_turn_deadlock": item.get("persistent_stationary_turn_deadlock"), "wm_enabled": False, "em_enabled": False, "exchange_mode": "off", "aih_enabled": False})
             coverage.append({"run_id": run_id, "seed": seed, "scout_id": sid, "total_distance_m": distance, "coverage_cells": len(cells), "coverage_cells_per_meter": len(cells) / distance if distance else 0.0, "coverage_gain_per_minute": 60 * len(cells) / active_time if active_time else 0.0})
-            trips.append({"run_id": run_id, "seed": seed, "scout_id": sid, "started_trip_count": item.get("started_trip_count"), "completed_trip_count": item.get("completed_trip_count"), "resource_detection_count": scoped_events.count("RESOURCE_DETECTED"), "collection_count": item.get("collection_count"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count")})
+            trips.append({"run_id": run_id, "seed": seed, "scout_id": sid, "started_cycle_count": item.get("started_trip_count"), "completed_cycle_count": item.get("completed_cycle_count", item.get("completed_trip_count")), "resource_detection_count": scoped_events.count("RESOURCE_LIGHT_DETECTED"), "harvest_completion_count": scoped_events.count("HARVEST_COMPLETE"), "return_attempt_count": item.get("return_attempt_count"), "nest_reached_count": scoped_events.count("NEST_REACHED"), "delivery_count": item.get("delivery_count")})
             repetition.append({"run_id": run_id, "seed": seed, "scout_id": sid, "revisit_count": revisits, "repeated_decision_count": repeated_decisions, "local_cycle_episode_count": 0, "repeated_local_behavior_duration_s": 0.0})
             if f(item.get("delivery_count")) > 0:
                 contributing += 1
@@ -102,31 +107,31 @@ def main() -> None:
                 episode_events[(row["scout_id"], row["trip_id"])].append(row)
         for (sid, trip_id), event_rows in episode_events.items():
             names = [row["event"] for row in event_rows]
-            if "SCOUT_START" not in names and "NEXT_TRIP_START" not in names and not any(name in names for name in ("RESOURCE_DETECTED", "COLLECT", "RETURN_HOME_START", "NEST_REACHED", "DELIVER")):
+            if "SCOUT_START" not in names and "NEXT_CYCLE_START" not in names and not any(name in names for name in ("RESOURCE_LIGHT_DETECTED", "HARVEST_COMPLETE", "RETURN_HOME_START", "NEST_REACHED", "DELIVER")):
                 continue
             first_time = lambda event: next((row["sim_time_s"] for row in event_rows if row["event"] == event), "")
             trajectory_rows = [
                 row for row in by_scout[sid] if row.get("trip_id") == trip_id
             ]
-            trip_start = first_time("SCOUT_START") or first_time("NEXT_TRIP_START") or event_rows[0]["sim_time_s"]
+            trip_start = first_time("SCOUT_START") or first_time("NEXT_CYCLE_START") or event_rows[0]["sim_time_s"]
             delivered = "DELIVER" in names
             if delivered:
                 status = "DELIVERED"
             elif "RETURN_HOME_START" in names:
                 status = "RETURN_IN_PROGRESS_AT_HORIZON"
-            elif "COLLECT" in names:
-                status = "COLLECTED_NOT_RETURNED_AT_HORIZON"
-            elif "RESOURCE_DETECTED" in names:
-                status = "RESOURCE_DETECTED_NOT_COLLECTED_AT_HORIZON"
+            elif "HARVEST_COMPLETE" in names:
+                status = "HARVESTED_NOT_RETURNED_AT_HORIZON"
+            elif "RESOURCE_LIGHT_DETECTED" in names:
+                status = "RESOURCE_DETECTED_NOT_HARVESTED_AT_HORIZON"
             else:
                 status = "RESOURCE_NOT_FOUND_AT_HORIZON"
             episodes.append({
                 "run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": trip_id,
                 "trip_start_time_s": trip_start,
-                "resource_detected": "RESOURCE_DETECTED" in names,
-                "resource_detected_time_s": first_time("RESOURCE_DETECTED"),
-                "collected": "COLLECT" in names,
-                "collection_time_s": first_time("COLLECT"),
+                "resource_detected": "RESOURCE_LIGHT_DETECTED" in names,
+                "resource_detected_time_s": first_time("RESOURCE_LIGHT_DETECTED"),
+                "harvest_completed": "HARVEST_COMPLETE" in names,
+                "harvest_complete_time_s": first_time("HARVEST_COMPLETE"),
                 "return_started": "RETURN_HOME_START" in names,
                 "return_start_time_s": first_time("RETURN_HOME_START"),
                 "nest_reached": "NEST_REACHED" in names,
@@ -139,9 +144,9 @@ def main() -> None:
                 "phase_at_episode_end": (trajectory_rows[-1]["phase"] if trajectory_rows else "NOT_OBSERVED"),
                 "actual_episode_duration_s": f(first_time("DELIVER") if delivered else (trajectory_rows[-1]["sim_time_s"] if trajectory_rows else duration)) - f(trip_start),
             })
-            funnel.append({"run_id": run_id, "seed": seed, "scout_id": sid, "trip_id": trip_id, "trip_started": int("SCOUT_START" in names or "NEXT_TRIP_START" in names), "resource_detected": int("RESOURCE_DETECTED" in names), "collected": int("COLLECT" in names), "return_started": int("RETURN_HOME_START" in names), "nest_reached": int("NEST_REACHED" in names), "delivered": int("DELIVER" in names)})
+            funnel.append({"run_id": run_id, "seed": seed, "scout_id": sid, "cycle_id": trip_id, "cycle_started": int("SCOUT_START" in names or "NEXT_CYCLE_START" in names), "resource_detected": int("RESOURCE_LIGHT_DETECTED" in names), "harvest_completed": int("HARVEST_COMPLETE" in names), "return_started": int("RETURN_HOME_START" in names), "nest_reached": int("NEST_REACHED" in names), "delivered": int("DELIVER" in names)})
 
-    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_episode.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition)]
+    specs = [("research_summary.csv", research), ("scout_summary.csv", scouts), ("foraging_episode_summary.csv", episodes), ("return_episode_summary.csv", returns), ("nest_energy_timeline.csv", energy), ("outcome_funnel_by_episode.csv", funnel), ("coverage_distance_by_scout.csv", coverage), ("trip_delivery_by_scout.csv", trips), ("foraging_rate_by_run.csv", rates), ("repetition_diagnostics.csv", repetition), ("resource_utilization_by_source.csv", resource_utilization)]
     for name, rows in specs:
         write_csv(output / name, rows, list(rows[0]) if rows else [])
     (output / "baseline_research_summary.json").write_text(json.dumps({"run_count": len(research), "valid_run_count": sum(row["experimental_validity"] == "VALID" for row in research), "mission_success_count": sum(row["mission_outcome"] == "MISSION_SUCCESS" for row in research)}, indent=2), encoding="utf-8")

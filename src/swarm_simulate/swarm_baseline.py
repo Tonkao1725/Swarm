@@ -33,6 +33,10 @@ class ScoutState:
     scout_id: int
     rng: random.Random
     phase: str = "EXPLORE"
+    # A C1 cycle is one Scout-local EXPLORE → ... → DELIVER lifecycle.  It is
+    # deliberately independent of legacy development ``trip_id`` limits.
+    cycle_id: int = 1
+    completed_cycle_count: int = 0
     trip_id: int = 1
     started_trip_count: int = 1
     turn_remaining_rad: float = 0.0
@@ -49,6 +53,19 @@ class ScoutState:
     blocked_count: int = 0
     resource_found_count: int = 0
     collection_count: int = 0
+    # Current payload only: not route, source-choice, or cross-trip memory.
+    carried_harvest_energy: float = 0.0
+    harvest_resource_id: str | None = None
+    harvest_start_s: float | None = None
+    harvest_elapsed_s: float = 0.0
+    harvest_episode_count: int = 0
+    total_harvested_energy: float = 0.0
+    delivered_harvest_energy: float = 0.0
+    last_delivered_energy: float = 0.0
+    internal_energy: float = 3.0
+    minimum_internal_energy: float = 3.0
+    depleted: bool = False
+    nest_withdrawn_energy: float = 0.0
     delivery_count: int = 0
     return_attempt_count: int = 0
     contact_stall_steps: int = 0
@@ -68,22 +85,19 @@ class ScoutState:
     recovery_rotation_rad: float = 0.0
     recovery_failure_detail: str = ""
     recovery_departure_steps: int = 0
-    resource_departure_steps: int = 0
     # Current obstacle-bypass maneuver only. Cleared as soon as a fresh scan
     # says that the nest cue can be pursued through a turn-safe local opening.
     bypass_active: bool = False
     bypass_departure_steps: int = 0
-    # Reporting-only detection of a controller pathology.  It never feeds a
-    # navigation choice and therefore cannot create a memory advantage.
-    return_stationary_turn_steps: int = 0
-    return_arbitration_pathology: bool = False
+    # Reporting-only physical-motion detector. It never feeds navigation.
+    # It is phase/action agnostic: persistent rotation without translation is
+    # invalid whether it occurs in Explore or Return.
+    stationary_rotation_steps: int = 0
+    max_stationary_rotation_steps: int = 0
+    persistent_stationary_turn_deadlock: bool = False
     previous_pose: RobotPose | None = None
     trip_start_s: float = 0.0
     collected_at_s: float | None = None
-    # One immediately preceding scalar beacon observation is low-level sensor
-    # feedback, not route/branch/position memory.  It is reset at the start
-    # of every return and is never available to Explore.
-    previous_nest_rssi: float | None = None
     trip_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -113,7 +127,9 @@ class BaselineSwarmRunner:
         self, *, env, run_dir: Path, energy_sensor: RandomEndpointEnergySensor,
         seed: int, scout_count: int, duration_s: float, trip_count: int,
         render_enabled: bool, mission_mode: str = "trip_limited",
-        nest_energy_target: int | None = None,
+        nest_energy_target: int | None = None, harvest_payload_target: float = 1.0,
+        internal_energy_capacity: float = 3.0, initial_internal_energy: float = 3.0,
+        energy_cost_per_encoder_distance: float = 0.01,
     ) -> None:
         if scout_count < 2:
             raise ValueError("Baseline swarm requires at least two Scouts")
@@ -128,6 +144,15 @@ class BaselineSwarmRunner:
         self.trip_count = int(trip_count)
         self.mission_mode = str(mission_mode)
         self.nest_energy_target = nest_energy_target
+        self.harvest_payload_target = float(harvest_payload_target)
+        self.internal_energy_capacity = float(internal_energy_capacity)
+        self.initial_internal_energy = float(initial_internal_energy)
+        self.energy_cost_per_encoder_distance = float(energy_cost_per_encoder_distance)
+        self.nest_energy = 0.0
+        self.gross_delivered_energy = 0.0
+        self.total_nest_withdrawal = 0.0
+        if self.harvest_payload_target <= 0.0:
+            raise ValueError("harvest_payload_target must be positive")
         if self.mission_mode not in {"research", "trip_limited"}:
             raise ValueError("mission_mode must be 'research' or 'trip_limited'")
         if self.mission_mode == "research" and (
@@ -155,14 +180,13 @@ class BaselineSwarmRunner:
         self.return_stationary_turn_limit = 2 * 8 * int(math.ceil(
             self.turn_angle_rad / (self.angular_speed_radps * self.env.step_time)
         ))
-        # A resource is a shared physical object: only one body can carry one
-        # unit at a time. This is environment state, not a Scout message or
-        # learned information. Delivery makes the controlled source available
-        # again for a later independent trip.
-        self.resource_carrier_id: int | None = None
+        # One complete local 360-degree scan may be a valid current-clearance
+        # maneuver. A second scan without any departure must yield/back off;
+        # otherwise two nearby bodies can keep each other in clearance limbo.
+        self.escape_turn_limit = 8
         # Display-only marker for visual replay.  It has no IR-SIM body and
         # never participates in collision, sensing, or controller state.
-        self._display_energy_marker = None
+        self._display_energy_markers: list[Circle] = []
         # IR-SIM's stock velocity glyph is 0.40 m long regardless of robot
         # size.  Use a display-only, physical-scale heading marker instead.
         self._display_heading_arrows: list[FancyArrowPatch] = []
@@ -182,6 +206,8 @@ class BaselineSwarmRunner:
             ScoutState(
                 scout_id=i,
                 rng=random.Random(self.seed + 104729 * i),
+                internal_energy=self.initial_internal_energy,
+                minimum_internal_energy=self.initial_internal_energy,
             )
             for i in range(self.scout_count)
         ]
@@ -215,7 +241,7 @@ class BaselineSwarmRunner:
             self.env.add_objects(extras)
 
     def _draw_energy_marker(self) -> None:
-        """Keep the fixed source visible in a rendered Baseline replay."""
+        """Keep every persistent C1 source visible in rendered replays."""
         if not self.render_enabled:
             return
         import matplotlib.pyplot as plt
@@ -224,14 +250,18 @@ class BaselineSwarmRunner:
         if not figure.axes:
             return
         axes = figure.axes[0]
-        if self._display_energy_marker is None:
-            self._display_energy_marker = Circle(
-                (self.energy_sensor.active_endpoint.x_m, self.energy_sensor.active_endpoint.y_m),
-                self.energy_sensor.visible_marker_radius_m,
-                facecolor="yellow", edgecolor="goldenrod", linewidth=1.5, zorder=100,
-            )
-        if self._display_energy_marker not in axes.patches:
-            axes.add_patch(self._display_energy_marker)
+        palette = [("yellow", "goldenrod"), ("orange", "saddlebrown"), ("gold", "darkorange")]
+        while len(self._display_energy_markers) < len(self.energy_sensor.endpoints):
+            index = len(self._display_energy_markers)
+            endpoint = self.energy_sensor.endpoints[index]
+            facecolor, edgecolor = palette[index % len(palette)]
+            self._display_energy_markers.append(Circle(
+                (endpoint.x_m, endpoint.y_m), self.energy_sensor.visible_marker_radius_m,
+                facecolor=facecolor, edgecolor=edgecolor, linewidth=1.5, zorder=100,
+            ))
+        for marker in self._display_energy_markers:
+            if marker not in axes.patches:
+                axes.add_patch(marker)
 
     def _draw_scout_heading_markers(self) -> None:
         """Draw one display-only, maze-scale heading arrow per Scout."""
@@ -258,7 +288,7 @@ class BaselineSwarmRunner:
             # physical carry state; it is not fed back into any controller
             # decision, memory, or inter-Scout communication.
             carrying_energy = (
-                self.resource_carrier_id == scout_id
+                self.scouts[scout_id].carried_harvest_energy > 0.0
                 and self.scouts[scout_id].phase == "RETURN_HOME"
             )
             arrow.set_color("red" if carrying_energy else "gold")
@@ -293,6 +323,26 @@ class BaselineSwarmRunner:
         # This makes every completed local turn 45° rather than ~46.4°.
         return 0.0, sign * delta / self.env.step_time, scout.turn_reason
 
+    def _record_physical_stationary_rotation(
+        self, scout: ScoutState, *, moved_m: float, turned: bool,
+        angular_velocity_radps: float,
+    ) -> None:
+        """Classify sustained physical rotation without departure.
+
+        This is reporting-only safety validation.  It deliberately uses no
+        phase or action label, so a renamed controller action cannot hide a
+        persistent Explore or Return deadlock.
+        """
+        if abs(angular_velocity_radps) > 1e-9 and turned and moved_m < 1e-7:
+            scout.stationary_rotation_steps += 1
+            scout.max_stationary_rotation_steps = max(
+                scout.max_stationary_rotation_steps, scout.stationary_rotation_steps
+            )
+            if scout.stationary_rotation_steps >= self.return_stationary_turn_limit:
+                scout.persistent_stationary_turn_deadlock = True
+        else:
+            scout.stationary_rotation_steps = 0
+
     def _clear_escape(self, scout: ScoutState) -> None:
         scout.escape_direction = 0.0
         scout.escape_turn_count = 0
@@ -324,6 +374,18 @@ class BaselineSwarmRunner:
         if scout.escape_direction == 0.0:
             scout.escape_direction = 1.0 if snapshot.left_m >= snapshot.right_m else -1.0
         scout.escape_turn_count += 1
+        if scout.escape_turn_count > self.escape_turn_limit:
+            # A full local scan did not expose a traversable segment. Yield
+            # with a bounded reverse maneuver, then take a fresh local scan.
+            # This retains only the current safety episode; no peer, location,
+            # obstacle, branch, or route is recorded.
+            scout.escape_direction = 0.0
+            scout.escape_turn_count = 0
+            scout.recovery_stage = "BACK_OFF"
+            scout.recovery_steps_remaining = self.bypass_departure_step_count
+            scout.recovery_translation_m = 0.0
+            scout.recovery_rotation_rad = 0.0
+            return -self.linear_speed_mps, 0.0, "CLEARANCE_YIELD_BACK_OFF"
         self._start_turn(scout, scout.escape_direction, "OBSTACLE_ESCAPE_TURN_45")
         return self._continue_turn(scout)
 
@@ -416,22 +478,14 @@ class BaselineSwarmRunner:
             scout.recovery_departure_steps = 0
         if scout.turn_remaining_rad and scout.escape_direction == 0.0:
             return self._continue_turn(scout)
-        if scout.resource_departure_steps:
-            if snapshot.front_m > self.safe_front_m:
-                scout.resource_departure_steps -= 1
-                return self.linear_speed_mps, 0.0, "RESOURCE_OCCUPIED_DEPART"
-            scout.resource_departure_steps = 0
-            scout.blocked_count += 1
-            return self._obstacle_escape_command(scout, snapshot)
         if reading.detected:
-            if self.resource_carrier_id is not None and self.resource_carrier_id != scout.scout_id:
-                direction = 1.0 if scout.rng.random() < 0.5 else -1.0
-                self._start_turn(scout, direction, "RESOURCE_OCCUPIED_TURN_45")
-                scout.resource_departure_steps = 8
-                return self._continue_turn(scout)
             scout.resource_found_count += 1
-            scout.phase = "COLLECT"
-            return 0.0, 0.0, "RESOURCE_DETECTED"
+            scout.phase = "HARVEST"
+            scout.harvest_resource_id = reading.endpoint_id
+            scout.harvest_start_s = float(self.env.time)
+            scout.harvest_elapsed_s = 0.0
+            scout.harvest_episode_count += 1
+            return 0.0, 0.0, "RESOURCE_LIGHT_DETECTED"
         # An obstacle escape is one bounded actuator maneuver. It takes
         # priority over light/random exploration until a fresh scan confirms
         # a safe forward direction, then its state is immediately discarded.
@@ -480,15 +534,8 @@ class BaselineSwarmRunner:
             # Rotate one body-safe 45-degree primitive to bring the cue into
             # the forward sensor field; only an *observed*, unsafe home ray
             # may invoke obstacle bypass.
-    def _return_command(
-        self, scout: ScoutState, snapshot, sensor, nest_rssi: float,
-    ) -> tuple[float, float, str]:
-        """Reactive return using only scalar RSSI feedback and local ToF.
-
-        The controller receives no Nest coordinates, vector, angle, or
-        distance.  ``previous_nest_rssi`` is one immediate sensor sample and
-        is discarded at the start of every new return episode.
-        """
+    def _return_command(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str]:
+        """Stateless local return movement; RSSI never steers this policy."""
         if scout.recovery_stage:
             return self._contact_recovery_command(scout, snapshot)
         if scout.escape_direction != 0.0:
@@ -500,29 +547,25 @@ class BaselineSwarmRunner:
             return self._obstacle_escape_command(scout, snapshot)
         if min(snapshot.left_m, snapshot.right_m) < self.turn_side_clearance_m:
             return self._begin_clear_side_turn(
-                scout, snapshot, "RETURN_RSSI_SIDE_CLEARANCE_ESCAPE_45"
+                scout, snapshot, "RETURN_LOCAL_SIDE_CLEARANCE_ESCAPE_45"
             )
-        previous = scout.previous_nest_rssi
-        scout.previous_nest_rssi = nest_rssi
-        if previous is None or nest_rssi >= previous - 1e-6:
-            return self.linear_speed_mps, 0.0, "RETURN_RSSI_FORWARD"
-        # A weaker scalar has no left/right meaning. Choose only from current
-        # local ToF openings; equal sides use the seeded per-Scout RNG.
-        if snapshot.left_m > snapshot.right_m:
-            direction = 1.0
-        elif snapshot.right_m > snapshot.left_m:
-            direction = -1.0
-        else:
+        if scout.rng.random() < 0.012:
             direction = 1.0 if scout.rng.random() < 0.5 else -1.0
-        self._start_turn(scout, direction, "RETURN_RSSI_DECLINE_TURN_45")
-        return self._continue_turn(scout)
+            self._start_turn(scout, direction, "RETURN_LOCAL_TURN_45")
+            return self._continue_turn(scout)
+        if not self._forward_body_clearance_safe(snapshot, sensor):
+            scout.blocked_count += 1
+            return self._begin_clear_side_turn(scout, snapshot, "RETURN_LOCAL_ESCAPE_45")
+        return self.linear_speed_mps, 0.0, "RETURN_LOCAL_FORWARD"
 
     def _environment_nest_reached(self, pose: RobotPose) -> bool:
-        """Environment event only; never exposed as a steering measurement."""
-        return math.hypot(
+        """Environment-only physical Nest entry plus RSSI confirmation."""
+        physical_entry = math.hypot(
             pose.x_m - self._nest_beacon.nest_x_m,
             pose.y_m - self._nest_beacon.nest_y_m,
         ) <= self.nest_delivery_radius_m
+        # The scalar is confirmation-only and is never supplied to movement.
+        return physical_entry and self._nest_beacon.sample(pose) >= 0.85
 
     def _command_for(
         self, scout: ScoutState, sensor: IRSimDirectionalRangeSensor,
@@ -531,40 +574,48 @@ class BaselineSwarmRunner:
         reading = self.energy_sensor.read(snapshot.pose, sensor)
         if scout.phase == "EXPLORE":
             linear, angular, action = self._explore_command(scout, snapshot, reading, sensor)
-        elif scout.phase == "COLLECT":
-            if self.resource_carrier_id is None:
-                self.resource_carrier_id = scout.scout_id
-                scout.collection_count += 1
-                scout.return_attempt_count += 1
-                scout.collected_at_s = float(self.env.time)
-                scout.phase = "RETURN_HOME"
-                scout.previous_nest_rssi = None
-                linear, angular, action = 0.0, 0.0, "COLLECT"
+        elif scout.phase == "HARVEST":
+            # The endpoint identity is environment/logger data only. The
+            # controller neither ranks nor navigates by rate or position.
+            endpoint = next((item for item in self.energy_sensor.endpoints
+                             if item.endpoint_id == scout.harvest_resource_id), None)
+            if endpoint is None or not reading.detected or reading.endpoint_id != endpoint.endpoint_id:
+                linear, angular, action = 0.0, 0.0, "HARVEST_PAUSED"
             else:
-                # The source is occupied by another physical carrier. Resume
-                # independent exploration; no information is retained.
-                scout.phase = "EXPLORE"
-                linear, angular, action = 0.0, 0.0, "RESOURCE_OCCUPIED"
+                increment = endpoint.relative_harvest_rate * self.env.step_time
+                scout.carried_harvest_energy = min(
+                    self.harvest_payload_target, scout.carried_harvest_energy + increment
+                )
+                scout.total_harvested_energy += increment
+                scout.harvest_elapsed_s += self.env.step_time
+                if scout.carried_harvest_energy >= self.harvest_payload_target - 1e-12:
+                    scout.collection_count += 1
+                    scout.return_attempt_count += 1
+                    scout.collected_at_s = float(self.env.time)
+                    scout.phase = "RETURN_HOME"
+                    linear, angular, action = 0.0, 0.0, "HARVEST_COMPLETE"
+                else:
+                    linear, angular, action = 0.0, 0.0, "HARVEST_ACTIVE"
         elif scout.phase == "RETURN_HOME":
             if self._environment_nest_reached(snapshot.pose):
                 scout.phase = "DELIVER"
                 linear, angular, action = 0.0, 0.0, "NEST_REACHED"
             else:
-                nest_rssi = self._nest_beacon.sample(snapshot.pose)
-                linear, angular, action = self._return_command(
-                    scout, snapshot, sensor, nest_rssi
-                )
+                linear, angular, action = self._return_command(scout, snapshot, sensor)
         elif scout.phase == "DELIVER":
             scout.delivery_count += 1
+            scout.completed_cycle_count += 1
             scout.trip_rows.append({
-                "trip_id": scout.trip_id, "outcome": "SUCCESS", "collection_s": scout.collected_at_s,
+                "trip_id": scout.trip_id, "cycle_id": scout.cycle_id, "outcome": "SUCCESS", "collection_s": scout.collected_at_s,
                 "delivery_s": float(self.env.time), "trip_distance_m": scout.trip_distance_m,
             })
             scout.trip_distance_m = 0.0
             scout.collected_at_s = None
-            scout.previous_nest_rssi = None
-            if self.resource_carrier_id == scout.scout_id:
-                self.resource_carrier_id = None
+            scout.last_delivered_energy = scout.carried_harvest_energy
+            scout.delivered_harvest_energy += scout.last_delivered_energy
+            scout.carried_harvest_energy = 0.0
+            scout.harvest_resource_id = None
+            scout.harvest_start_s = None
             scout.phase = (
                 "COMPLETE"
                 if self.mission_mode == "trip_limited" and scout.trip_id >= self.trip_count
@@ -573,6 +624,7 @@ class BaselineSwarmRunner:
             scout.trip_id += 1
             if scout.phase == "EXPLORE":
                 scout.started_trip_count += 1
+                scout.cycle_id += 1
             linear, angular, action = 0.0, 0.0, "DELIVER"
         else:
             linear, angular, action = 0.0, 0.0, "MISSION_COMPLETE"
@@ -601,24 +653,32 @@ class BaselineSwarmRunner:
         energy_timeline_file = (self.run_dir / "nest_energy_timeline.csv").open(
             "w", newline="", encoding="utf-8"
         )
+        robot_energy_file = (self.run_dir / "robot_energy_timeline.csv").open("w", newline="", encoding="utf-8")
         trajectory_writer = csv.DictWriter(trajectory, fieldnames=[
-            "sim_time_s", "scout_id", "trip_id", "phase", "x_m", "y_m", "heading_deg", "action",
+            "sim_time_s", "scout_id", "trip_id", "cycle_id", "phase", "x_m", "y_m", "heading_deg", "action",
             "linear_velocity_mps", "angular_velocity_radps", "front_m", "left_m", "right_m", "solar_max",
             "cumulative_distance_m", "trip_distance_m", "diagonal_turn_count",
         ])
         event_writer = csv.DictWriter(event_file, fieldnames=["sim_time_s", "scout_id", "trip_id", "event", "detail"])
-        trip_writer = csv.DictWriter(trip_file, fieldnames=["scout_id", "trip_id", "outcome", "collection_s", "delivery_s", "trip_distance_m"])
+        trip_writer = csv.DictWriter(trip_file, fieldnames=["scout_id", "trip_id", "cycle_id", "outcome", "collection_s", "delivery_s", "trip_distance_m"])
         energy_timeline_writer = csv.DictWriter(
             energy_timeline_file,
-            fieldnames=["run_id", "seed", "timestamp", "scout_id", "previous_energy", "delivered_energy", "new_energy", "target"],
+            fieldnames=[
+                "run_id", "seed", "timestamp", "scout_id", "event_type",
+                "previous_energy", "delivered_energy", "withdrawal_energy",
+                "new_energy", "gross_delivered_energy", "target",
+            ],
         )
-        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader(); energy_timeline_writer.writeheader()
+        robot_energy_writer = csv.DictWriter(robot_energy_file, fieldnames=["sim_time_s", "scout_id", "internal_energy", "phase"])
+        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader(); energy_timeline_writer.writeheader(); robot_energy_writer.writeheader()
         coverage: dict[int, set[tuple[int, int]]] = {i: set() for i in range(self.scout_count)}
         for scout in self.scouts:
             scout.previous_pose = self._pose(self.env, scout.scout_id)
             scout.trip_start_s = 0.0
             event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
                                    "event": "SCOUT_START", "detail": "independent local-reactive baseline"})
+            robot_energy_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id,
+                                         "internal_energy": scout.internal_energy, "phase": scout.phase})
 
         maximum_steps = int(math.ceil(self.duration_s / self.env.step_time))
         mission_complete = False
@@ -640,6 +700,17 @@ class BaselineSwarmRunner:
                 pose = self._pose(self.env, scout.scout_id)
                 moved = math.hypot(pose.x_m - scout.previous_pose.x_m, pose.y_m - scout.previous_pose.y_m)
                 turned = abs(_wrap(pose.theta_rad - scout.previous_pose.theta_rad)) > 1e-7
+                # Wheel-path proxy from the executed differential command:
+                # linear path plus in-place wheel travel. This is common
+                # energy physics and never feeds a strategic C1 decision.
+                wheel_path_delta = moved + 0.07 * abs(_wrap(pose.theta_rad - scout.previous_pose.theta_rad))
+                scout.internal_energy = max(0.0, scout.internal_energy - self.energy_cost_per_encoder_distance * wheel_path_delta)
+                scout.minimum_internal_energy = min(scout.minimum_internal_energy, scout.internal_energy)
+                robot_depleted_started = False
+                if scout.internal_energy <= 1e-12 and scout.phase not in {"COMPLETE", "CONTACT_STALLED", "DEPLETED"}:
+                    scout.depleted = True
+                    scout.phase = "DEPLETED"
+                    robot_depleted_started = True
                 commanded_motion = abs(linear) > 1e-9 or abs(angular) > 1e-9
                 if recovery_stage:
                     scout.recovery_translation_m += moved
@@ -693,15 +764,10 @@ class BaselineSwarmRunner:
                         scout.contact_stalled = True
                         scout.phase = "CONTACT_STALLED"
                         contact_stall_started = True
-                if (
-                    action == "RETURN_LOCAL_ARBITRATION_TURN_45"
-                    and moved < 1e-7
-                ):
-                    scout.return_stationary_turn_steps += 1
-                    if scout.return_stationary_turn_steps >= self.return_stationary_turn_limit:
-                        scout.return_arbitration_pathology = True
-                else:
-                    scout.return_stationary_turn_steps = 0
+                self._record_physical_stationary_rotation(
+                    scout, moved_m=moved, turned=turned,
+                    angular_velocity_radps=angular,
+                )
                 if (
                     commanded_motion and moved < 1e-7 and not turned
                     and not scout.recovery_stage
@@ -738,59 +804,96 @@ class BaselineSwarmRunner:
                 coverage[scout.scout_id].add((math.floor(pose.x_m / 0.5), math.floor(pose.y_m / 0.5)))
                 trajectory_writer.writerow({
                     "sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                    "trip_id": (scout.trip_id if self.mission_mode == "research" else min(scout.trip_id, self.trip_count)), "phase": scout.phase,
+                    "trip_id": (scout.trip_id if self.mission_mode == "research" else min(scout.trip_id, self.trip_count)),
+                    "cycle_id": scout.cycle_id, "phase": scout.phase,
                     "x_m": pose.x_m, "y_m": pose.y_m, "heading_deg": math.degrees(pose.theta_rad),
                     "action": action, "linear_velocity_mps": linear, "angular_velocity_radps": angular,
                     "front_m": snapshot.front_m, "left_m": snapshot.left_m, "right_m": snapshot.right_m,
                     "solar_max": reading.solar_max, "cumulative_distance_m": scout.distance_m,
                     "trip_distance_m": scout.trip_distance_m, "diagonal_turn_count": scout.diagonal_turn_count,
                 })
+                robot_energy_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                             "internal_energy": scout.internal_energy, "phase": scout.phase})
                 if action == "RESOURCE_DETECTED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "RESOURCE_DETECTED",
                                            "detail": self.energy_sensor.active_endpoint.endpoint_id})
-                elif action == "COLLECT":
+                elif action == "RESOURCE_LIGHT_DETECTED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                                           "trip_id": scout.trip_id, "event": "COLLECT",
-                                           "detail": "one_energy_unit"})
-                    # COLLECT changes the state to RETURN_HOME in the same
-                    # controller step.  This extra event is audit evidence;
-                    # it does not feed back into any controller decision.
+                                           "trip_id": scout.trip_id, "event": "RESOURCE_LIGHT_DETECTED",
+                                           "detail": scout.harvest_resource_id or "UNKNOWN"})
+                elif action == "HARVEST_ACTIVE":
+                    event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                           "trip_id": scout.trip_id, "event": "HARVEST_ACTIVE",
+                                           "detail": f"resource_id={scout.harvest_resource_id}; carried_energy={scout.carried_harvest_energy:.6f}"})
+                elif action == "HARVEST_COMPLETE":
+                    event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                           "trip_id": scout.trip_id, "event": "HARVEST_COMPLETE",
+                                           "detail": f"resource_id={scout.harvest_resource_id}; carried_energy={scout.carried_harvest_energy:.6f}; harvest_elapsed_s={scout.harvest_elapsed_s:.6f}"})
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "RETURN_HOME_START",
-                                           "detail": "idealized_rssi_like_scalar_feedback"})
+                                           "detail": "stateless_local_reactive_return; rssi_confirmation_only"})
                 elif action == "NEST_REACHED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "NEST_REACHED",
                                            "detail": "within_nest_delivery_radius"})
                 elif action == "DELIVER":
                     delivered_trip_id = scout.trip_id - 1
-                    nest_energy_after = sum(item.delivery_count for item in self.scouts)
-                    nest_energy_before = nest_energy_after - 1
+                    nest_energy_before = self.nest_energy
+                    delivered_energy = scout.last_delivered_energy
+                    self.gross_delivered_energy += delivered_energy
+                    self.nest_energy += delivered_energy
+                    nest_energy_after = self.nest_energy
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": delivered_trip_id, "event": "DELIVER",
                                            "detail": (
                                                f"nest_energy_before={nest_energy_before}; "
                                                f"nest_energy_after={nest_energy_after}; "
-                                               "resource_carrier_released=true"
+                                               f"delivered_harvest_energy={delivered_energy:.6f}"
                                            )})
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": delivered_trip_id, "event": "NEST_ENERGY_UPDATED",
-                                           "detail": f"previous_energy={nest_energy_before}; delivered_energy=1; new_energy={nest_energy_after}; target={self.nest_energy_target}"})
+                                           "detail": f"previous_energy={nest_energy_before:.6f}; delivered_energy={delivered_energy:.6f}; new_energy={nest_energy_after:.6f}; target={self.nest_energy_target}"})
                     energy_timeline_writer.writerow({
                         "run_id": self.run_dir.name, "seed": self.seed,
                         "timestamp": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                        "previous_energy": nest_energy_before, "delivered_energy": 1,
-                        "new_energy": nest_energy_after, "target": self.nest_energy_target,
+                        "event_type": "DELIVERY",
+                        "previous_energy": nest_energy_before, "delivered_energy": delivered_energy,
+                        "withdrawal_energy": 0.0, "new_energy": nest_energy_after,
+                        "gross_delivered_energy": self.gross_delivered_energy,
+                        "target": self.nest_energy_target,
                     })
-                    if scout.phase == "EXPLORE":
+                    # Delivery has priority. Only if the target remains
+                    # unreached may this no-AIH Scout refill from the common
+                    # Nest for its next exploratory cycle.
+                    if self.nest_energy < self.nest_energy_target:
+                        required = max(0.0, self.internal_energy_capacity - scout.internal_energy)
+                        withdrawal = min(required, self.nest_energy)
+                        if withdrawal > 0.0:
+                            self.nest_energy -= withdrawal
+                            self.total_nest_withdrawal += withdrawal
+                            scout.internal_energy += withdrawal
+                            scout.nest_withdrawn_energy += withdrawal
+                            event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                                   "trip_id": scout.trip_id, "event": "NEST_ENERGY_WITHDRAWAL",
+                                                   "detail": f"withdrawal={withdrawal:.6f}; net_nest_energy={self.nest_energy:.6f}; robot_energy={scout.internal_energy:.6f}"})
+                            energy_timeline_writer.writerow({
+                                "run_id": self.run_dir.name, "seed": self.seed,
+                                "timestamp": round(float(self.env.time), 6), "scout_id": scout.scout_id,
+                                "event_type": "ROBOT_RECHARGE_WITHDRAWAL",
+                                "previous_energy": nest_energy_after, "delivered_energy": 0.0,
+                                "withdrawal_energy": withdrawal, "new_energy": self.nest_energy,
+                                "gross_delivered_energy": self.gross_delivered_energy,
+                                "target": self.nest_energy_target,
+                            })
+                    if scout.phase == "EXPLORE" and self.nest_energy < self.nest_energy_target:
                         event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                                               "trip_id": scout.trip_id, "event": "NEXT_TRIP_START",
-                                               "detail": "memory_free_reactive_explore"})
-                elif action == "RESOURCE_OCCUPIED":
+                                               "trip_id": scout.trip_id, "event": "NEXT_CYCLE_START",
+                                               "detail": f"cycle_id={scout.cycle_id}; memory_free_reactive_explore"})
+                if robot_depleted_started:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                                           "trip_id": min(scout.trip_id, self.trip_count), "event": action,
-                                           "detail": "held_by_another_scout"})
+                                           "trip_id": scout.trip_id, "event": "ROBOT_DEPLETED",
+                                           "detail": "internal_energy_reached_zero"})
                 if contact_stall_started:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "CONTACT_STALLED",
@@ -807,14 +910,13 @@ class BaselineSwarmRunner:
                 self.env.render()
                 self._draw_energy_marker()
                 self._draw_scout_heading_markers()
-            delivered_this_tick = sum(s.delivery_count for s in self.scouts)
-            if self.mission_mode == "research" and delivered_this_tick >= self.nest_energy_target:
+            if self.mission_mode == "research" and self.nest_energy >= self.nest_energy_target:
                 mission_complete = True
                 target_reached_time_s = round(float(self.env.time), 6)
                 termination_reason = "NEST_ENERGY_TARGET_REACHED"
                 event_writer.writerow({"sim_time_s": target_reached_time_s, "scout_id": "COLONY",
                                        "trip_id": "", "event": "MISSION_COMPLETE",
-                                       "detail": f"nest_energy={delivered_this_tick}; target={self.nest_energy_target}; termination_reason=NEST_ENERGY_TARGET_REACHED"})
+                                       "detail": f"nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}; termination_reason=NEST_ENERGY_TARGET_REACHED"})
                 break
             if self.mission_mode == "trip_limited" and all(s.phase == "COMPLETE" for s in self.scouts):
                 mission_complete = True
@@ -824,17 +926,17 @@ class BaselineSwarmRunner:
         if self.mission_mode == "research" and not mission_complete:
             event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": "COLONY",
                                    "trip_id": "", "event": "EXPERIMENT_TERMINATED",
-                                   "detail": f"reason=EXPERIMENT_HORIZON_REACHED; nest_energy={sum(s.delivery_count for s in self.scouts)}; target={self.nest_energy_target}"})
+                                   "detail": f"reason=EXPERIMENT_HORIZON_REACHED; nest_energy={self.nest_energy:.6f}; target={self.nest_energy_target}"})
         for scout in self.scouts:
             for row in scout.trip_rows:
                 trip_writer.writerow({"scout_id": scout.scout_id, **row})
-        trajectory.close(); event_file.close(); trip_file.close(); energy_timeline_file.close()
+        trajectory.close(); event_file.close(); trip_file.close(); energy_timeline_file.close(); robot_energy_file.close()
 
-        delivered = sum(s.delivery_count for s in self.scouts)
+        delivered = self.nest_energy
         all_complete = all(s.phase == "COMPLETE" for s in self.scouts)
         has_controller_contact_failure = any(s.contact_stalled for s in self.scouts)
-        has_return_arbitration_pathology = any(
-            s.return_arbitration_pathology for s in self.scouts
+        has_stationary_turn_deadlock = any(
+            s.persistent_stationary_turn_deadlock for s in self.scouts
         )
         if self.mission_mode == "research" and not mission_complete:
             termination_reason = "EXPERIMENT_HORIZON_REACHED"
@@ -851,12 +953,15 @@ class BaselineSwarmRunner:
             # visibly invalid until the engineering defect is removed.
             "experimental_validity": (
                 "INVALID_CONTROLLER_CONTACT_FAILURE"
-                if has_controller_contact_failure or has_return_arbitration_pathology
+                if has_controller_contact_failure or has_stationary_turn_deadlock
                 else "VALID"
             ),
             "experiment": "CONDITION_1_BASELINE_MULTI_SCOUT_LOCAL_REACTIVE",
             "scout_count": self.scout_count, "requested_trips_per_scout": self.trip_count,
             "simulation_time_s": round(float(self.env.time), 6), "nest_energy_units": delivered,
+            "gross_delivered_energy": self.gross_delivered_energy,
+            "total_robot_nest_withdrawal": self.total_nest_withdrawal,
+            "net_nest_energy": self.nest_energy,
             "nest_energy_target": self.nest_energy_target,
             "target_reached": mission_complete if self.mission_mode == "research" else None,
             "target_reached_time_s": target_reached_time_s,
@@ -864,10 +969,10 @@ class BaselineSwarmRunner:
             "mission_mode": self.mission_mode,
             "working_memory_enabled": False, "experience_memory_enabled": False,
             "hormone_enabled": False, "exchange_enabled": False, "shared_map_created": False,
-            "return_navigation": "RSSI_GRADIENT_LOCAL_REACTIVE_COMMON_INFRASTRUCTURE",
+            "return_navigation": "STATELESS_LOCAL_REACTIVE_NO_RSSI_STEERING",
             "nest_cue_definition": (
-                "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE; scalar signal only; "
-                "no position, distance, bearing, route, map, or planner"
+                "RSSI confirmation only with physical Nest-entry validation; "
+                "not navigation, bearing, distance, route, map, or planner"
             ),
             "local_45_degree_turn_enabled": True,
             "isolation_assertions": {
@@ -876,15 +981,19 @@ class BaselineSwarmRunner:
             },
             "scouts": [{
                 "scout_id": s.scout_id, "phase_at_termination": s.phase, "completed_trip_count": s.delivery_count, "started_trip_count": s.started_trip_count,
+                "completed_cycle_count": s.completed_cycle_count, "active_cycle_id": s.cycle_id,
                 "behavioral_outcome": self._behavioral_outcome(s), "resource_found_count": s.resource_found_count,
                 "collection_count": s.collection_count, "delivery_count": s.delivery_count,
+                "internal_energy_final": s.internal_energy, "internal_energy_min": s.minimum_internal_energy,
+                "nest_withdrawn_energy": s.nest_withdrawn_energy, "depleted": s.depleted,
                 "distance_m": s.distance_m, "coverage_cells_0_5m": len(coverage[s.scout_id]),
                 "diagonal_turn_count": s.diagonal_turn_count,
                 "blocked_turn_count": s.obstacle_turn_count,
                 "blocked_sensor_samples": s.blocked_count,
                 "contact_stalled": s.contact_stalled,
                 "contact_recovery_count": s.contact_recovery_count,
-                "return_arbitration_pathology": s.return_arbitration_pathology,
+                "persistent_stationary_turn_deadlock": s.persistent_stationary_turn_deadlock,
+                "max_consecutive_stationary_rotation_steps": s.max_stationary_rotation_steps,
                 "reactive_oscillation_warning": s.obstacle_turn_count >= 20 and s.obstacle_turn_count / max(1, s.diagonal_turn_count) >= 0.80,
             } for s in self.scouts],
         }

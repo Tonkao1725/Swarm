@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import random
 from typing import Sequence
@@ -13,6 +13,7 @@ class EnergyEndpoint:
     endpoint_id: str
     x_m: float
     y_m: float
+    relative_harvest_rate: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,11 @@ class RandomEndpointEnergySensor:
     def active_endpoint(self) -> EnergyEndpoint:
         return self._active
 
+    @property
+    def endpoints(self) -> tuple[EnergyEndpoint, ...]:
+        """Persistent environment-owned sources, never a controller route list."""
+        return self._endpoints
+
     def activate_endpoint(self, endpoint_id: str) -> EnergyEndpoint:
         """Switch the active resource for a controlled relocation experiment."""
         for endpoint in self._endpoints:
@@ -215,7 +221,7 @@ class RandomEndpointEnergySensor:
         )
         return max(0.0, min(1.0, value))
 
-    def read(self, pose: RobotPose, range_sensor) -> EnergyReading:
+    def _read_one(self, pose: RobotPose, range_sensor) -> EnergyReading:
         dx = self._active.x_m - pose.x_m
         dy = self._active.y_m - pose.y_m
         distance = math.hypot(dx, dy)
@@ -359,4 +365,39 @@ class RandomEndpointEnergySensor:
             approach_active=approach_active,
             light_state=light_state,
             light_path_factor=path_factor,
+        )
+
+    def read(self, pose: RobotPose, range_sensor) -> EnergyReading:
+        """Synthesize one local solar observation from persistent sources.
+
+        Coordinates remain inside this environment/sensor method. The
+        controller receives only the aggregate L/C/R signal and near-field
+        validity; `endpoint_id` is for logger/harvest accounting only.
+        """
+        previous = self._active
+        readings: list[tuple[EnergyEndpoint, EnergyReading]] = []
+        for endpoint in self._endpoints:
+            self._active = endpoint
+            readings.append((endpoint, self._read_one(pose, range_sensor)))
+        self._active = previous
+        base_endpoint, base = max(readings, key=lambda item: item[1].solar_max)
+        valid = [item for item in readings if item[1].collect_threshold_reached]
+        harvest_endpoint, harvest = min(valid, key=lambda item: item[1].distance_m) if valid else (None, None)
+        left = min(1.0, sum(item.solar_left for _, item in readings))
+        center = min(1.0, sum(item.solar_center for _, item in readings))
+        right = min(1.0, sum(item.solar_right for _, item in readings))
+        solar_max = max(left, center, right)
+        strongest = "NONE" if solar_max <= self.ZERO_LIGHT_EPSILON else max(
+            (("LEFT", left), ("CENTER", center), ("RIGHT", right)), key=lambda item: item[1]
+        )[0]
+        return replace(
+            base, detected=harvest is not None,
+            endpoint_id=harvest_endpoint.endpoint_id if harvest_endpoint else None,
+            solar_left=left, solar_center=center, solar_right=right,
+            solar_max=solar_max, solar_mean=(left + center + right) / 3.0,
+            strongest_direction=strongest,
+            guidance_active=solar_max >= self.detect_threshold,
+            collect_threshold_reached=harvest is not None,
+            approach_active=solar_max >= self.detect_threshold and harvest is None,
+            light_state="HARVEST_READY" if harvest else ("LIGHT_APPROACH" if solar_max >= self.detect_threshold else "SEARCH"),
         )

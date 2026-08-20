@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import os
 import sys
 import time
@@ -157,10 +158,16 @@ def main() -> int:
         experience_action_bonus=10.0,
     )
 
-    # Controlled experiment: one fixed source at the upper-right corner.
-    # Keeping the source constant isolates learning effects across trips.
-    endpoints = (
-        EnergyEndpoint("E_FIXED_NE", 11.875, 11.875),
+    resource_config_path = PROJECT_ROOT / "config" / "resource_harvesting_config.json"
+    resource_config = json.loads(resource_config_path.read_text(encoding="utf-8"))
+    # Common infrastructure: persistent sources. Their pilot-normalized
+    # harvest rates are environment properties, never controller inputs.
+    endpoints = tuple(
+        EnergyEndpoint(
+            item["resource_id"], float(item["x_m"]), float(item["y_m"]),
+            float(item["relative_harvest_rate"]),
+        )
+        for item in resource_config["sources"]
     )
     # Fixed-source pickup zone.
     # The Energy marker is display-only and does not collide with the robot,
@@ -245,33 +252,29 @@ def main() -> int:
             "hormone_enabled": False,
             "exchange_enabled": False,
             "shared_map_created": False,
-            "return_navigation": "RSSI_GRADIENT_LOCAL_REACTIVE_COMMON_INFRASTRUCTURE",
+            "return_navigation": "STATELESS_LOCAL_REACTIVE_RSSI_CONFIRMATION_ONLY",
         },
         "trip_control_environment_variable": (
             "FORAGING_TRIPS"
         ),
-        "energy_reselection_between_trips": False,
-        "fixed_energy_source": True,
-        "working_memory_reset_each_trip": True,
-        "experience_memory_persists_across_trips": True,
+        "energy_reselection_between_trips": "NOT_APPLICABLE_PERSISTENT_MULTI_SOURCE_C1",
+        "fixed_energy_source": False,
+        "working_memory_reset_each_trip": False,
+        "experience_memory_persists_across_trips": False,
         "world_map_created": False,
-        "navigation_model": "RAT_INSPIRED_DECISION_MEMORY_WITH_BREADCRUMB_PRUNING",
+        "navigation_model": "MEMORY_FREE_LOCAL_REACTIVE_BASELINE",
         "nest_energy_accumulates": True,
         "base_world_file": BASE_WORLD_FILE.name,
         "runtime_world_file": runtime_world_file.name,
         "decision_route_predefined": False,
-        "decision_policy": (
-            "STRICT_LOS_LIGHT_WHEN_VISIBLE; "
-            "BOUNDED_EXPERIENCE_BIAS_WHEN_CONTEXT_MATCHES; "
-            "OTHERWISE_RAT_WEIGHTED_WIN_SHIFT"
-        ),
-        "energy_location": "FIXED_UPPER_RIGHT",
+        "decision_policy": "CURRENT_TOF_LOCAL_AVOIDANCE_AND_STRICT_LOS_SOLAR; SEEDED_REACTIVE_EXPLORATION",
+        "energy_location": "THREE_CONFIGURED_PERSISTENT_SOURCES",
         "energy_source_control": {
-            "mode": "FIXED_CONTROLLED_SOURCE",
-            "endpoint_id": energy_sensor.active_endpoint.endpoint_id,
-            "x_m": energy_sensor.active_endpoint.x_m,
-            "y_m": energy_sensor.active_endpoint.y_m,
-            "reason": "Hold environment constant while measuring learning",
+            "mode": "THREE_PERSISTENT_LIGHT_ENERGY_SOURCES",
+            "sources": [{"resource_id": item.endpoint_id, "x_m": item.x_m, "y_m": item.y_m, "relative_harvest_rate": item.relative_harvest_rate} for item in endpoints],
+            "pilot_normalized_rates": True,
+            "concurrent_harvesting_allowed": True,
+            "resource_depletion_enabled": False,
         },
         "maze_design": {
             "name": "original_selected_validated_maze",
@@ -319,7 +322,7 @@ def main() -> int:
             "guidance_requires_line_of_sight": True,
             "wall_blocked_solar_values_forced_to_zero": True,
             "diffuse_light_enabled": False,
-            "collection_mode": "NEAR_FIELD_DISTANCE_0_20_M",
+            "collection_mode": "PERSISTENT_NEAR_FIELD_HARVEST_RATE_X_DT",
         },
         "energy_minimum_reachable_center_distance_m": (
             exploration_config.wall_stop_distance_m
@@ -327,13 +330,9 @@ def main() -> int:
         ),
         "energy_marker": {
             "visible": True,
-            "shape": "yellow_circle",
+            "shape": "persistent_source_circles",
             "radius_m": 0.12,
-            "endpoint_id": (
-                energy_sensor.active_endpoint.endpoint_id
-            ),
-            "x_m": energy_sensor.active_endpoint.x_m,
-            "y_m": energy_sensor.active_endpoint.y_m,
+            "sources": [{"resource_id": item.endpoint_id, "x_m": item.x_m, "y_m": item.y_m} for item in endpoints],
         },
         "energy_random_seed": seed ^ 0x5A17,
         "decision_random_seed": seed,
@@ -428,7 +427,7 @@ def main() -> int:
             "navigation_model": "MEMORY_FREE_LOCAL_REACTIVE_BASELINE",
             "decision_policy": (
                 "CURRENT_TOF_LOCAL_AVOIDANCE; STRICT_LOS_SOLAR; "
-                "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE"
+                "RSSI_CONFIRMATION_ONLY_AT_PHYSICAL_NEST_ENTRY"
             ),
             "working_memory_reset_each_trip": False,
             "experience_memory_persists_across_trips": False,
@@ -439,10 +438,10 @@ def main() -> int:
                 "artificial_internal_hormone": False,
                 "route_breadcrumbs": False,
                 "reactive_exploration": True,
-                "nest_cue": "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE",
+                "nest_cue": "PHYSICAL_NEST_ENTRY_PLUS_RSSI_CONFIRMATION_ONLY",
                 "nest_cue_definition": (
-                    "IDEALIZED_RSSI_LIKE_COMMON_NEST_CUE; scalar signal "
-                    "only; no position, distance, bearing, route, map, or planner"
+                    "PHYSICAL_NEST_ENTRY_PLUS_RSSI_CONFIRMATION_ONLY; no RSSI steering, "
+                    "position, distance, bearing, route, map, or planner"
                 ),
             },
             "available_system_capabilities": {
@@ -452,6 +451,18 @@ def main() -> int:
                 "artificial_internal_hormone": True,
             },
         })
+        run_config["fixes"] = [
+            "ORIGINAL_VALIDATED_MAZE_TOPOLOGY",
+            "THREE_PERSISTENT_ENERGY_SOURCES_A_B_C",
+            "PILOT_NORMALIZED_HARVEST_RATE_X_DT",
+            "STRICT_LOS_SOLAR_FIELD",
+            "CURRENT_TOF_LOCAL_COLLISION_SAFETY",
+            "STATELESS_45_DEGREE_REACTIVE_EXPLORATION",
+            "RSSI_CONFIRMATION_ONLY_AT_PHYSICAL_NEST_ENTRY",
+            "COMMON_INTERNAL_ROBOT_ENERGY_ACCOUNTING",
+            "NEST_ENERGY_GROSS_WITHDRAWAL_NET_LEDGER",
+            "NO_WM_EM_EXCHANGE_AIH",
+        ]
 
     env = backend = logger = trace = hud = None
     memory = WorkingMemory(
@@ -480,7 +491,9 @@ def main() -> int:
             logger.snapshot_sources([
                 PROJECT_ROOT / "main.py", BASE_WORLD_FILE,
                 runtime_world_file, SOURCE_ROOT / "swarm_baseline.py",
+                resource_config_path,
                 SOURCE_ROOT / "irsim_range_sensor.py",
+                SOURCE_ROOT / "energy_sensor.py",
                 SOURCE_ROOT / "result_logger.py",
             ])
             logger.log_event(
@@ -492,6 +505,10 @@ def main() -> int:
                 env=env, run_dir=logger.run_dir, energy_sensor=energy_sensor,
                 seed=seed, scout_count=scout_count,
                 duration_s=swarm_duration_s, trip_count=trip_count,
+                harvest_payload_target=float(resource_config["harvest_payload_target"]),
+                internal_energy_capacity=float(resource_config["robot_internal_energy_capacity"]),
+                initial_internal_energy=float(resource_config["robot_initial_internal_energy"]),
+                energy_cost_per_encoder_distance=float(resource_config["energy_cost_per_encoder_distance"]),
                 render_enabled=render_enabled, mission_mode=swarm_mission_mode,
                 nest_energy_target=nest_energy_target,
             ).run()
