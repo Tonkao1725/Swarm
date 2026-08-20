@@ -36,7 +36,8 @@
 - Targeted static and runner-level lifecycle/accounting checks: PASS.
 - Fast-headless versus standard deterministic equivalence (60 s): PASS.
 - Canonical 3-seed × 3600 s development validation: PASS for engineering validity, with no contact stall or stationary-turn deadlock.
-- These development outputs are not research data and do not authorize a freeze or 20-seed batch yet; final static provenance/config review remains pending.
+- Static provenance/config review completed after the development gate. Canonical source commit: `d763d3961507a404e8a17c7337e3c2c6a3d7a9f2`; tag: `canonical-condition1-baseline-energy-v1`.
+- Development outputs remain non-research data. The next authorized operation is the canonical R01–R20 research batch using the immutable seed manifest.
 
 ## Files expected to change
 
