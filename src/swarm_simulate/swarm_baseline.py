@@ -22,6 +22,7 @@ from matplotlib.patches import Circle, FancyArrowPatch
 from energy_sensor import RandomEndpointEnergySensor
 from irsim_range_sensor import IRSimDirectionalRangeSensor
 from motion_types import RobotPose
+from c2_working_memory import CycleWorkingMemory, wrap as _wm_wrap
 
 
 def _wrap(angle: float) -> float:
@@ -99,6 +100,19 @@ class ScoutState:
     trip_start_s: float = 0.0
     collected_at_s: float | None = None
     trip_rows: list[dict[str, Any]] = field(default_factory=list)
+    # C2 only.  When disabled this object remains empty and is never read by
+    # any navigation branch, preserving C1's action/RNG sequence exactly.
+    working_memory: CycleWorkingMemory | None = None
+    wm_last_logged_target_size: int | None = None
+    # F3 correction only: bounded current-cycle route-reacquisition state.
+    # Tracks whether the active WM retrace target is yielding real local
+    # progress; used only inside the working_memory_enabled WM branch of
+    # _return_command and never read by any C1 branch.
+    wm_target_lock: tuple[float, float] | None = None
+    wm_target_lock_x_m: float = 0.0
+    wm_target_lock_y_m: float = 0.0
+    wm_stuck_ticks: int = 0
+    wm_route_reacquisition_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -130,6 +144,7 @@ class BaselineSwarmRunner:
         nest_energy_target: int | None = None, harvest_payload_target: float = 1.0,
         internal_energy_capacity: float = 3.0, initial_internal_energy: float = 3.0,
         energy_cost_per_encoder_distance: float = 0.01,
+        working_memory_enabled: bool = False,
     ) -> None:
         if scout_count < 2:
             raise ValueError("Baseline swarm requires at least two Scouts")
@@ -148,6 +163,7 @@ class BaselineSwarmRunner:
         self.internal_energy_capacity = float(internal_energy_capacity)
         self.initial_internal_energy = float(initial_internal_energy)
         self.energy_cost_per_encoder_distance = float(energy_cost_per_encoder_distance)
+        self.working_memory_enabled = bool(working_memory_enabled)
         self.nest_energy = 0.0
         self.gross_delivered_energy = 0.0
         self.total_nest_withdrawal = 0.0
@@ -208,6 +224,7 @@ class BaselineSwarmRunner:
                 rng=random.Random(self.seed + 104729 * i),
                 internal_energy=self.initial_internal_energy,
                 minimum_internal_energy=self.initial_internal_energy,
+                working_memory=CycleWorkingMemory(enabled=self.working_memory_enabled),
             )
             for i in range(self.scout_count)
         ]
@@ -536,12 +553,83 @@ class BaselineSwarmRunner:
             # may invoke obstacle bypass.
     def _return_command(self, scout: ScoutState, snapshot, sensor) -> tuple[float, float, str]:
         """Stateless local return movement; RSSI never steers this policy."""
+        # Complete an already-issued actuator maneuver before reading a WM
+        # waypoint.  Otherwise a new 45-degree request every tick overwrites
+        # the remaining angle and creates a stationary rotation pathology.
+        # These C1 safety branches retain their original priority.
         if scout.recovery_stage:
             return self._contact_recovery_command(scout, snapshot)
         if scout.escape_direction != 0.0:
             return self._obstacle_escape_command(scout, snapshot)
         if scout.turn_remaining_rad:
             return self._continue_turn(scout)
+        # C2's only navigation difference: retrace sparse waypoints generated
+        # by this Scout's executed outbound odometry in *this* cycle.  The WM
+        # object has no Nest/Resource/environment coordinates and no RNG.  If
+        # it is empty or disabled, the C1 branch below is unchanged.
+        memory = scout.working_memory
+        if self.working_memory_enabled and memory is not None:
+            if memory.pop_if_reached(scout.cycle_id):
+                scout.wm_target_lock = None
+                scout.wm_stuck_ticks = 0
+                return 0.0, 0.0, "WM_POP_RETRACE"
+            # F4 correction: the final current-cycle breadcrumb (the local
+            # origin) is a valid retrace target on its own.  The previous
+            # `len(memory.entries) > 1` guard here caused C2 to silently
+            # abandon WM guidance the instant only that last, still-valid
+            # entry remained -- confirmed in
+            # tests/C2_FAILED_RETURN_ROOT_CAUSE_ANALYSIS.md (Part K/F4) to
+            # hand control to the untargeted C1 stateless fallback inside
+            # the gap between the WM pop tolerance (0.28 m) and the Nest
+            # delivery radius (0.12 m).  `pop_if_reached` above already
+            # never removes this last entry (`len(self.entries) > 1` in
+            # c2_working_memory.py), so continuing to steer toward it here
+            # cannot make WM lose or invent a waypoint; it only lets the
+            # existing final-approach retrace finish instead of stopping
+            # one step early.
+            target = memory.return_target(scout.cycle_id)
+            if target is not None:
+                # F3 correction: bounded current-cycle route reacquisition.
+                # If the active target has not yielded at least one
+                # breadcrumb-spacing (memory.spacing_m) of net local
+                # progress within return_stationary_turn_limit ticks -- the
+                # same pathology bound already used for the existing
+                # stationary-turn deadlock report -- treat this target as
+                # temporarily unreachable and fall back to the next-older
+                # current-cycle breadcrumb.  This uses only this Scout's
+                # own stored route and local odometry; it adds no map,
+                # coordinate, or path beyond what WM already recorded.
+                if scout.wm_target_lock != target:
+                    scout.wm_target_lock = target
+                    scout.wm_target_lock_x_m, scout.wm_target_lock_y_m = memory.x_m, memory.y_m
+                    scout.wm_stuck_ticks = 0
+                else:
+                    progressed = math.hypot(
+                        memory.x_m - scout.wm_target_lock_x_m,
+                        memory.y_m - scout.wm_target_lock_y_m,
+                    ) >= memory.spacing_m
+                    if progressed:
+                        scout.wm_target_lock_x_m, scout.wm_target_lock_y_m = memory.x_m, memory.y_m
+                        scout.wm_stuck_ticks = 0
+                    else:
+                        scout.wm_stuck_ticks += 1
+                if (
+                    scout.wm_stuck_ticks >= self.return_stationary_turn_limit
+                    and memory.skip_unreachable(scout.cycle_id)
+                ):
+                    scout.wm_route_reacquisition_count += 1
+                    scout.wm_target_lock = None
+                    scout.wm_stuck_ticks = 0
+                    return 0.0, 0.0, "WM_ROUTE_REACQUIRE"
+                dx, dy = target[0] - memory.x_m, target[1] - memory.y_m
+                desired_heading = math.atan2(dy, dx)
+                heading_error = _wm_wrap(desired_heading - memory.heading_rad)
+                if abs(heading_error) > math.radians(22.5):
+                    self._start_turn(scout, 1.0 if heading_error > 0.0 else -1.0,
+                                     "WM_RETRACE_TURN_45")
+                    return self._continue_turn(scout)
+                if self._forward_body_clearance_safe(snapshot, sensor):
+                    return self.linear_speed_mps, 0.0, "WM_RETRACE_FORWARD"
         if snapshot.front_m <= self.safe_front_m:
             scout.blocked_count += 1
             return self._obstacle_escape_command(scout, snapshot)
@@ -699,6 +787,8 @@ class BaselineSwarmRunner:
             "w", newline="", encoding="utf-8"
         )
         robot_energy_file = (self.run_dir / "robot_energy_timeline.csv").open("w", newline="", encoding="utf-8")
+        transition_file = (self.run_dir / "state_transitions.csv").open("w", newline="", encoding="utf-8")
+        wm_file = (self.run_dir / "working_memory_events.csv").open("w", newline="", encoding="utf-8")
         trajectory_writer = csv.DictWriter(trajectory, fieldnames=[
             "sim_time_s", "scout_id", "trip_id", "cycle_id", "phase", "x_m", "y_m", "heading_deg", "action",
             "linear_velocity_mps", "angular_velocity_radps", "front_m", "left_m", "right_m", "solar_max",
@@ -714,16 +804,22 @@ class BaselineSwarmRunner:
                 "new_energy", "gross_delivered_energy", "target",
             ],
         )
-        robot_energy_writer = csv.DictWriter(robot_energy_file, fieldnames=["sim_time_s", "scout_id", "internal_energy", "phase"])
-        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader(); energy_timeline_writer.writeheader(); robot_energy_writer.writeheader()
+        robot_energy_writer = csv.DictWriter(robot_energy_file, fieldnames=["sim_time_s", "scout_id", "trip_id", "cycle_id", "phase", "internal_energy", "energy_before", "energy_after", "energy_consumed", "event"])
+        transition_writer = csv.DictWriter(transition_file, fieldnames=["sim_time_s", "seed", "scout_id", "trip_id", "cycle_id", "previous_state", "new_state", "reason"])
+        wm_writer = csv.DictWriter(wm_file, fieldnames=["sim_time_s", "seed", "scout_id", "cycle_id", "operation", "wm_size", "detail"])
+        trajectory_writer.writeheader(); event_writer.writeheader(); trip_writer.writeheader(); energy_timeline_writer.writeheader(); robot_energy_writer.writeheader(); transition_writer.writeheader(); wm_writer.writeheader()
         coverage: dict[int, set[tuple[int, int]]] = {i: set() for i in range(self.scout_count)}
         for scout in self.scouts:
             scout.previous_pose = self._pose(self.env, scout.scout_id)
             scout.trip_start_s = 0.0
+            if self.working_memory_enabled and scout.working_memory is not None:
+                scout.working_memory.start_cycle(scout.cycle_id)
+                scout.wm_last_logged_target_size = None
+                wm_writer.writerow({"sim_time_s": 0.0, "seed": self.seed, "scout_id": scout.scout_id, "cycle_id": scout.cycle_id, "operation": "WM_RESET", "wm_size": scout.working_memory.size, "detail": "cycle_start_local_origin"})
             event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
                                    "event": "SCOUT_START", "detail": "independent local-reactive baseline"})
             robot_energy_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id,
-                                         "internal_energy": scout.internal_energy, "phase": scout.phase})
+                                         "trip_id": scout.trip_id, "cycle_id": scout.cycle_id, "internal_energy": scout.internal_energy, "energy_before": scout.internal_energy, "energy_after": scout.internal_energy, "energy_consumed": 0.0, "event": "INITIAL", "phase": scout.phase})
 
         maximum_steps = int(math.ceil(self.duration_s / self.env.step_time))
         mission_complete = False
@@ -790,17 +886,18 @@ class BaselineSwarmRunner:
                 last_meaningful_event_time_s = now
             commands, rows = [], []
             for scout, sensor in zip(self.scouts, self.sensors, strict=True):
+                previous_phase = scout.phase
                 linear, angular, action, reading, snapshot = self._command_for(scout, sensor)
                 commands.append([linear, angular])
                 rows.append((
-                    scout, snapshot, reading, action, linear, angular,
+                    scout, snapshot, reading, action, linear, angular, previous_phase,
                     scout.recovery_stage,
                 ))
                 if scout.phase not in {"DEPLETED", "COMPLETE"}:
                     last_active_scout_id = scout.scout_id
             action_ids = [self.env.objects.index(self.env.robot_list[i]) for i in range(self.scout_count)]
             self.env.step(commands, action_id=action_ids)
-            for scout, snapshot, reading, action, linear, angular, recovery_stage in rows:
+            for scout, snapshot, reading, action, linear, angular, previous_phase, recovery_stage in rows:
                 contact_stall_started = False
                 pose = self._pose(self.env, scout.scout_id)
                 moved = math.hypot(pose.x_m - scout.previous_pose.x_m, pose.y_m - scout.previous_pose.y_m)
@@ -809,7 +906,9 @@ class BaselineSwarmRunner:
                 # linear path plus in-place wheel travel. This is common
                 # energy physics and never feeds a strategic C1 decision.
                 wheel_path_delta = moved + 0.07 * abs(_wrap(pose.theta_rad - scout.previous_pose.theta_rad))
-                scout.internal_energy = max(0.0, scout.internal_energy - self.energy_cost_per_encoder_distance * wheel_path_delta)
+                energy_before = scout.internal_energy
+                energy_consumed = self.energy_cost_per_encoder_distance * wheel_path_delta
+                scout.internal_energy = max(0.0, energy_before - energy_consumed)
                 scout.minimum_internal_energy = min(scout.minimum_internal_energy, scout.internal_energy)
                 robot_depleted_started = False
                 if scout.internal_energy <= 1e-12 and scout.phase not in {"COMPLETE", "CONTACT_STALLED", "DEPLETED", "DELIVER"}:
@@ -903,6 +1002,17 @@ class BaselineSwarmRunner:
                         contact_stall_started = True
                 scout.distance_m += moved
                 scout.trip_distance_m += moved
+                heading_delta = _wrap(pose.theta_rad - scout.previous_pose.theta_rad)
+                wm_operation = None
+                if (
+                    self.working_memory_enabled and scout.working_memory is not None
+                    and scout.phase in {"EXPLORE", "HARVEST", "RETURN_HOME"}
+                ):
+                    wm_operation = scout.working_memory.update_executed_motion(
+                        moved_m=moved, heading_delta_rad=heading_delta,
+                        cycle_id=scout.cycle_id,
+                        record_breadcrumb=scout.phase in {"EXPLORE", "HARVEST"},
+                    )
                 scout.previous_pose = pose
                 # Passive research metric only.  Restore the historical
                 # maze-scale 0.50 m reporting bin; this never feeds control.
@@ -918,7 +1028,23 @@ class BaselineSwarmRunner:
                     "trip_distance_m": scout.trip_distance_m, "diagonal_turn_count": scout.diagonal_turn_count,
                 })
                 robot_energy_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
-                                             "internal_energy": scout.internal_energy, "phase": scout.phase})
+                                             "trip_id": scout.trip_id, "cycle_id": scout.cycle_id, "internal_energy": scout.internal_energy, "energy_before": energy_before, "energy_after": scout.internal_energy, "energy_consumed": energy_consumed, "event": "MOTION", "phase": scout.phase})
+                if previous_phase != scout.phase:
+                    transition_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "seed": self.seed,
+                                                "scout_id": scout.scout_id, "trip_id": scout.trip_id,
+                                                "cycle_id": scout.cycle_id, "previous_state": previous_phase,
+                                                "new_state": scout.phase, "reason": action})
+                if self.working_memory_enabled and scout.working_memory is not None:
+                    memory = scout.working_memory
+                    if wm_operation is not None:
+                        wm_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "seed": self.seed, "scout_id": scout.scout_id, "cycle_id": scout.cycle_id, "operation": wm_operation, "wm_size": memory.size, "detail": "executed_outbound_odometry"})
+                    # A read is meaningful for analysis only when the active
+                    # retrace target changes (the stack size changes).  Do not
+                    # write a duplicate row for every control tick.
+                    if action in {"WM_POP_RETRACE", "WM_RETRACE_FORWARD", "WM_RETRACE_TURN_45", "WM_ROUTE_REACQUIRE"} and scout.wm_last_logged_target_size != memory.size:
+                        operation = "WM_POP" if action == "WM_POP_RETRACE" else ("WM_ROUTE_REACQUIRE" if action == "WM_ROUTE_REACQUIRE" else "WM_READ")
+                        wm_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "seed": self.seed, "scout_id": scout.scout_id, "cycle_id": scout.cycle_id, "operation": operation, "wm_size": memory.size, "detail": action})
+                        scout.wm_last_logged_target_size = memory.size
                 if action == "RESOURCE_DETECTED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "RESOURCE_DETECTED",
@@ -937,7 +1063,9 @@ class BaselineSwarmRunner:
                                            "detail": f"resource_id={scout.harvest_resource_id}; carried_energy={scout.carried_harvest_energy:.6f}; harvest_elapsed_s={scout.harvest_elapsed_s:.6f}"})
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "RETURN_HOME_START",
-                                           "detail": "stateless_local_reactive_return; rssi_confirmation_only"})
+                                           "detail": ("CURRENT_CYCLE_WORKING_MEMORY_RETRACE; local_safety_override_allowed"
+                                                      if self.working_memory_enabled else
+                                                      "stateless_local_reactive_return; rssi_confirmation_only")})
                 elif action == "NEST_REACHED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "NEST_REACHED",
@@ -992,9 +1120,18 @@ class BaselineSwarmRunner:
                                 "target": self.nest_energy_target,
                             })
                     if scout.phase == "EXPLORE" and not self._nest_target_reached():
+                        if self.working_memory_enabled and scout.working_memory is not None:
+                            memory = scout.working_memory
+                            memory.reset()
+                            scout.wm_last_logged_target_size = None
+                            scout.wm_target_lock = None
+                            scout.wm_stuck_ticks = 0
+                            wm_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "seed": self.seed, "scout_id": scout.scout_id, "cycle_id": delivered_trip_id, "operation": "WM_RESET", "wm_size": 0, "detail": "cycle_completed"})
+                            memory.start_cycle(scout.cycle_id)
+                            wm_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "seed": self.seed, "scout_id": scout.scout_id, "cycle_id": scout.cycle_id, "operation": "WM_RESET", "wm_size": memory.size, "detail": "next_cycle_local_origin"})
                         event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                                "trip_id": scout.trip_id, "event": "NEXT_CYCLE_START",
-                                               "detail": f"cycle_id={scout.cycle_id}; memory_free_reactive_explore"})
+                                               "detail": f"cycle_id={scout.cycle_id}; {'working_memory_cycle_local_explore' if self.working_memory_enabled else 'memory_free_reactive_explore'}"})
                 if robot_depleted_started:
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "ROBOT_DEPLETED",
@@ -1051,7 +1188,7 @@ class BaselineSwarmRunner:
         for scout in self.scouts:
             for row in scout.trip_rows:
                 trip_writer.writerow({"scout_id": scout.scout_id, **row})
-        trajectory.close(); event_file.close(); trip_file.close(); energy_timeline_file.close(); robot_energy_file.close()
+        trajectory.close(); event_file.close(); trip_file.close(); energy_timeline_file.close(); robot_energy_file.close(); transition_file.close(); wm_file.close()
 
         delivered = self.nest_energy
         all_complete = all(s.phase == "COMPLETE" for s in self.scouts)
@@ -1078,7 +1215,7 @@ class BaselineSwarmRunner:
                 if has_controller_contact_failure or has_stationary_turn_deadlock
                 else "VALID"
             ),
-            "experiment": "CONDITION_1_BASELINE_MULTI_SCOUT_LOCAL_REACTIVE",
+            "experiment": ("CONDITION_2_WORKING_MEMORY_DEVELOPMENT" if self.working_memory_enabled else "CONDITION_1_BASELINE_MULTI_SCOUT_LOCAL_REACTIVE"),
             "scout_count": self.scout_count, "requested_trips_per_scout": self.trip_count,
             "simulation_time_s": round(float(self.env.time), 6), "nest_energy_units": delivered,
             "gross_delivered_energy": self.gross_delivered_energy,
@@ -1092,16 +1229,16 @@ class BaselineSwarmRunner:
             "last_meaningful_event_time_s": last_meaningful_event_time_s,
             "termination_state": self._termination_state_snapshot(last_meaningful_event_time_s, last_active_scout_id),
             "mission_mode": self.mission_mode,
-            "working_memory_enabled": False, "experience_memory_enabled": False,
+            "working_memory_enabled": self.working_memory_enabled, "experience_memory_enabled": False,
             "hormone_enabled": False, "exchange_enabled": False, "shared_map_created": False,
-            "return_navigation": "STATELESS_LOCAL_REACTIVE_NO_RSSI_STEERING",
+            "return_navigation": ("CURRENT_CYCLE_ODOMETRIC_BREADCRUMB_RETRACE_WITH_LOCAL_SAFETY" if self.working_memory_enabled else "STATELESS_LOCAL_REACTIVE_NO_RSSI_STEERING"),
             "nest_cue_definition": (
                 "RSSI confirmation only with physical Nest-entry validation; "
                 "not navigation, bearing, distance, route, map, or planner"
             ),
             "local_45_degree_turn_enabled": True,
             "isolation_assertions": {
-                "visited_branch_memory": False, "route_breadcrumbs": False,
+                "visited_branch_memory": False, "route_breadcrumbs": self.working_memory_enabled,
                 "cross_trip_preference": False, "message_bus": False, "global_planner": False,
             },
             "scouts": [{
@@ -1120,6 +1257,13 @@ class BaselineSwarmRunner:
                 "persistent_stationary_turn_deadlock": s.persistent_stationary_turn_deadlock,
                 "max_consecutive_stationary_rotation_steps": s.max_stationary_rotation_steps,
                 "reactive_oscillation_warning": s.obstacle_turn_count >= 20 and s.obstacle_turn_count / max(1, s.diagonal_turn_count) >= 0.80,
+                "working_memory_entries": s.working_memory.size if s.working_memory else 0,
+                "working_memory_max_size": s.working_memory.max_size if s.working_memory else 0,
+                "working_memory_reads": s.working_memory.read_count if s.working_memory else 0,
+                "working_memory_pops": s.working_memory.pop_count if s.working_memory else 0,
+                "working_memory_resets": s.working_memory.reset_count if s.working_memory else 0,
+                "working_memory_prunes": s.working_memory.prune_count if s.working_memory else 0,
+                "working_memory_route_reacquisitions": s.working_memory.skip_count if s.working_memory else 0,
             } for s in self.scouts],
         }
         (self.run_dir / "swarm_summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

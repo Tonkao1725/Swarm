@@ -38,7 +38,6 @@ def main() -> None:
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     rows = read_csv(run_dir / "swarm_trajectory.csv")
-    events = read_csv(run_dir / "swarm_events.csv")
     metadata = yaml.safe_load((PROJECT_ROOT / "config" / "robot_world.yaml").read_text(encoding="utf-8"))
     run_metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
     seed = run_metadata["configuration"]["decision_random_seed"]
@@ -57,21 +56,15 @@ def main() -> None:
         }
     duration = max(trace["t"][-1] for trace in traces.values())
     frame_times = np.arange(0.0, duration + args.frame_step_s, args.frame_step_s)
-    energy_updates = [event for event in events if event["event"] == "NEST_ENERGY_UPDATED"]
-    lifecycle_events = [event for event in events if event["event"] in {
-        "RESOURCE_LIGHT_DETECTED", "HARVEST_COMPLETE", "RETURN_HOME_START", "NEST_REACHED", "DELIVER", "NEXT_CYCLE_START"
-    }]
-
-    fig = plt.figure(figsize=(15, 8.5), facecolor="white")
-    ax = fig.add_axes([0.05, 0.08, 0.64, 0.86])
-    side = fig.add_axes([0.72, 0.13, 0.25, 0.76])
-    side.axis("off")
+    # Keep the exported replay deliberately uncluttered for presentation:
+    # the maze, sources, robot motion, and a single simulation-time readout.
+    fig = plt.figure(figsize=(9.2, 9.2), facecolor="white")
+    ax = fig.add_axes([0.10, 0.08, 0.84, 0.84])
     ax.set_aspect("equal")
     ax.set_xlim(0, 14)
     ax.set_ylim(0, 14)
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.set_title("Condition 1 Baseline — Replay from recorded trajectory", fontsize=16, weight="bold")
     for obstacle in metadata["obstacle"]:
         shape = obstacle["shape"]
         x, y, _ = obstacle["state"]
@@ -89,7 +82,7 @@ def main() -> None:
     robots = {sid: ax.plot([], [], "o", color=SCOUT_COLORS[sid], markersize=16, zorder=5)[0]
               for sid in traces}
     arrows = {sid: ax.plot([], [], color="#ffd400", linewidth=2.8, zorder=6)[0] for sid in traces}
-    time_text = ax.text(7, 14.35, "", ha="center", va="bottom", fontsize=15, weight="bold")
+    time_text = ax.text(7, 14.28, "", ha="center", va="bottom", fontsize=15, weight="bold")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     writer = FFMpegWriter(fps=args.fps, bitrate=2500, metadata={
@@ -98,21 +91,6 @@ def main() -> None:
     })
     with writer.saving(fig, str(args.output), dpi=110):
         for t in frame_times:
-            latest_event = None
-            for event in lifecycle_events:
-                if float(event["sim_time_s"]) <= t:
-                    latest_event = event
-                else:
-                    break
-            observed_updates = [event for event in energy_updates if float(event["sim_time_s"]) <= t]
-            nest_energy = (float(observed_updates[-1]["detail"].split("new_energy=")[1].split(";")[0])
-                           if observed_updates else 0.0)
-            side.clear()
-            side.axis("off")
-            side.text(0, 0.98, "REPLAY STATUS", fontsize=16, weight="bold", va="top")
-            side.text(0, 0.86, f"Seed     : {seed}\nTime     : {t:,.0f} / {duration:,.0f} s\nNet Nest energy : {nest_energy:.1f} / 6",
-                      fontsize=12, family="monospace", va="top")
-            side.text(0, 0.63, "Legend", fontsize=13, weight="bold")
             for i, sid in enumerate(("0", "1", "2")):
                 trace = traces[sid]
                 idx = max(0, np.searchsorted(trace["t"], t, side="right") - 1)
@@ -126,16 +104,7 @@ def main() -> None:
                 arrow_color = "#df2020" if carrying else "#ffd400"
                 arrows[sid].set_color(arrow_color)
                 arrows[sid].set_data([x, x + 0.34 * math.cos(heading)], [y, y + 0.34 * math.sin(heading)])
-                side.text(0, 0.57 - i * 0.075,
-                          f"● Scout {sid}  {phase:<11}  Cycle {trace['trip'][idx]}",
-                          color=SCOUT_COLORS[sid], fontsize=11, family="monospace")
-            if latest_event is None:
-                event_label = "Mission event: exploring"
-            else:
-                event_label = f"Last event ({float(latest_event['sim_time_s']):.1f} s):\nScout {latest_event['scout_id']} — {latest_event['event']}"
-            side.text(0, 0.26, event_label, fontsize=11, va="top", wrap=True)
-            side.text(0, 0.08, "Gold arrow: exploring\nRed arrow: carrying energy", fontsize=10, color="#444444")
-            time_text.set_text(f"Simulation time: {t:,.0f} s  |  Research replay (accelerated)")
+            time_text.set_text(f"Simulation time: {t:,.0f} s")
             writer.grab_frame()
     plt.close(fig)
 

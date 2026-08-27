@@ -115,8 +115,8 @@ def main() -> int:
         raise ValueError("SWARM_SCOUT_COUNT must be between 1 and 4")
     if swarm_duration_s <= 0.0:
         raise ValueError("SWARM_SIM_DURATION_S must be greater than 0")
-    if scout_count > 1 and experiment_mode.mode.value != "baseline":
-        raise ValueError("Multi-Scout runs currently require SWARM_EXPERIMENT_MODE=baseline")
+    if scout_count > 1 and experiment_mode.mode.value not in {"baseline", "working_memory"}:
+        raise ValueError("Multi-Scout runs currently support baseline or working_memory development mode only")
     batch_results_root_raw = os.environ.get("SWARM_RESULTS_ROOT", "").strip()
     batch_results_root = (
         Path(batch_results_root_raw).resolve()
@@ -227,7 +227,11 @@ def main() -> int:
         "mission_mode": swarm_mission_mode,
         "trip_limit_applies": swarm_mission_mode == "trip_limited",
         "mission_termination": (
-            "NEST_ENERGY_TARGET_OR_HORIZON"
+            (
+                "NEST_ENERGY_TARGET_OR_ALL_DEPLETED_OR_HORIZON"
+                if experiment_mode.working_memory_enabled
+                else "NEST_ENERGY_TARGET_OR_HORIZON"
+            )
             if swarm_mission_mode == "research"
             else "FORAGING_TRIPS_OR_HORIZON"
         ),
@@ -247,22 +251,23 @@ def main() -> int:
             ),
             "duration_s": swarm_duration_s,
             "policy": "LOCAL_REACTIVE_45_DEGREE_FULL_FORAGING_CYCLE",
-            "working_memory_enabled": False,
+            "working_memory_enabled": experiment_mode.working_memory_enabled,
             "experience_memory_enabled": False,
             "hormone_enabled": False,
             "exchange_enabled": False,
             "shared_map_created": False,
-            "return_navigation": "STATELESS_LOCAL_REACTIVE_RSSI_CONFIRMATION_ONLY",
+            "return_navigation": ("CURRENT_CYCLE_ODOMETRIC_BREADCRUMB_RETRACE_WITH_LOCAL_SAFETY"
+                                  if experiment_mode.working_memory_enabled else "STATELESS_LOCAL_REACTIVE_RSSI_CONFIRMATION_ONLY"),
         },
         "trip_control_environment_variable": (
             "FORAGING_TRIPS"
         ),
         "energy_reselection_between_trips": "NOT_APPLICABLE_PERSISTENT_MULTI_SOURCE_C1",
         "fixed_energy_source": False,
-        "working_memory_reset_each_trip": False,
+        "working_memory_reset_each_trip": experiment_mode.working_memory_enabled,
         "experience_memory_persists_across_trips": False,
         "world_map_created": False,
-        "navigation_model": "MEMORY_FREE_LOCAL_REACTIVE_BASELINE",
+        "navigation_model": ("C2_CURRENT_CYCLE_WORKING_MEMORY_RETRACE" if experiment_mode.working_memory_enabled else "MEMORY_FREE_LOCAL_REACTIVE_BASELINE"),
         "nest_energy_accumulates": True,
         "base_world_file": BASE_WORLD_FILE.name,
         "runtime_world_file": runtime_world_file.name,
@@ -478,7 +483,19 @@ def main() -> int:
         experience.clear_persistent_routes()
 
     try:
-        env = irsim.make(str(runtime_world_file))
+        # Presentation-only: reuse the existing render_enabled intent
+        # (IRSIM_RENDER / FAST_HEADLESS_RESEARCH_MODE) so headless/research
+        # runs never open an interactive matplotlib window or block on
+        # env.end()'s plt.pause(3.0). Interactive development mode
+        # (render_enabled=True) keeps IR-SIM's own default display
+        # behavior exactly as before. This changes nothing about
+        # simulation state, sensors, RNG, or control decisions -- see
+        # tests/HEADLESS_GUI_EQUIVALENCE_REPORT.md.
+        env = irsim.make(
+            str(runtime_world_file),
+            display=render_enabled,
+            disable_all_plot=not render_enabled,
+        )
         logger = RunLogger(
             PROJECT_ROOT,
             env,
@@ -491,15 +508,32 @@ def main() -> int:
             logger.snapshot_sources([
                 PROJECT_ROOT / "main.py", BASE_WORLD_FILE,
                 runtime_world_file, SOURCE_ROOT / "swarm_baseline.py",
+                SOURCE_ROOT / "c2_working_memory.py",
                 resource_config_path,
                 SOURCE_ROOT / "irsim_range_sensor.py",
                 SOURCE_ROOT / "energy_sensor.py",
                 SOURCE_ROOT / "result_logger.py",
+                SOURCE_ROOT / "experiment_modes.py",
+                SOURCE_ROOT / "motion_types.py",
+                SOURCE_ROOT / "sensor_types.py",
+                SOURCE_ROOT / "world_builder.py",
+                SOURCE_ROOT / "wheel_model.py",
+                SOURCE_ROOT / "encoder_model.py",
+                SOURCE_ROOT / "odometry.py",
+                SOURCE_ROOT / "imperfection_model.py",
+                SOURCE_ROOT / "irsim_backend.py",
+                SOURCE_ROOT / "motion_controller.py",
+                SOURCE_ROOT / "motion_profile.py",
+                SOURCE_ROOT / "autonomous_foraging_controller.py",
+                SOURCE_ROOT / "working_memory.py",
+                SOURCE_ROOT / "experience_memory.py",
+                SOURCE_ROOT / "decision_trace_logger.py",
+                SOURCE_ROOT / "sim_hud.py",
             ])
             logger.log_event(
                 "SWARM_BASELINE_START",
                 f"seed={seed}; scouts={scout_count}; duration_s={swarm_duration_s}; "
-                "WM=off; EM=off; hormone=off; exchange=off",
+                f"WM={'on' if experiment_mode.working_memory_enabled else 'off'}; EM=off; hormone=off; exchange=off",
             )
             result = BaselineSwarmRunner(
                 env=env, run_dir=logger.run_dir, energy_sensor=energy_sensor,
@@ -511,6 +545,7 @@ def main() -> int:
                 energy_cost_per_encoder_distance=float(resource_config["energy_cost_per_encoder_distance"]),
                 render_enabled=render_enabled, mission_mode=swarm_mission_mode,
                 nest_energy_target=nest_energy_target,
+                working_memory_enabled=experiment_mode.working_memory_enabled,
             ).run()
             logger.log_event(
                 "SWARM_BASELINE_COMPLETE",

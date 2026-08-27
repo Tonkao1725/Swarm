@@ -1,0 +1,58 @@
+dev,seed,scout_id,metric,old_value,corrected_value,notes
+DEV01,2118334751,ALL,mission_outcome,TIME_LIMIT_REACHED,TIME_LIMIT_REACHED,unchanged
+DEV01,2118334751,ALL,nest_energy_units,0.000,0.000,unchanged
+DEV01,2118334751,ALL,gross_delivered_energy,2.000,1.000,fewer deliveries in the same 3600s horizon
+DEV01,2118334751,ALL,return_attempts,4,4,unchanged (same number of HARVEST_COMPLETE events)
+DEV01,2118334751,ALL,nest_reaches,2,1,regressed by 1
+DEV01,2118334751,0,delivery_count,2,1,scout0 trip2 (previously successful in 650.8s) now fails via TIME_LIMIT after 1781.4s of non-convergent WM retrace
+DEV01,2118334751,0,depleted,True,False,improved -- no longer depletes
+DEV01,2118334751,0,distance_m,422.0,154.5,large reduction in total distance travelled
+DEV01,2118334751,0,working_memory_pops,411,211,fewer pops (shorter effective retrace per episode)
+DEV01,2118334751,0,working_memory_prunes,385,0,prunes eliminated -- route reacquisition keeps WM size well under capacity
+DEV01,2118334751,0,working_memory_route_reacquisitions,N/A (field did not exist),12,new F3 mechanism engaged 12 times
+DEV01,2118334751,1,delivery_count,0,0,unchanged (still fails)
+DEV01,2118334751,1,depleted,True,True,unchanged -- still depletes, but root cause changed (see report Part E/K)
+DEV01,2118334751,1,distance_m,165.5,117.3,reduced distance to depletion
+DEV01,2118334751,1,working_memory_pops,9,38,more pops -- WM engaged more before depletion (old run abandoned WM near-immediately via F3 deadlock)
+DEV01,2118334751,1,working_memory_prunes,247,32,large reduction
+DEV01,2118334751,1,working_memory_route_reacquisitions,N/A,14,new F3 mechanism engaged 14 times
+DEV01,2118334751,2,delivery_count,0,0,unchanged (still fails, still active at TIME_LIMIT)
+DEV01,2118334751,2,depleted,False,False,unchanged
+DEV01,2118334751,2,distance_m,30.8,40.5,slightly more distance travelled but still far from Nest
+DEV01,2118334751,2,working_memory_route_reacquisitions,N/A,10,new F3 mechanism engaged 10 times
+DEV02,920265301,ALL,mission_outcome,TIME_LIMIT_REACHED,TIME_LIMIT_REACHED,unchanged
+DEV02,920265301,ALL,nest_energy_units,0.000,0.000,unchanged
+DEV02,920265301,ALL,gross_delivered_energy,0.000,0.000,unchanged -- still 0/3
+DEV02,920265301,ALL,return_attempts,3,3,unchanged
+DEV02,920265301,ALL,nest_reaches,0,0,unchanged -- see report Part L for why this is not the same failure mode as before
+DEV02,920265301,0,delivery_count,0,0,unchanged
+DEV02,920265301,0,depleted,False,False,unchanged
+DEV02,920265301,0,distance_m,40.8,41.1,essentially unchanged
+DEV02,920265301,0,working_memory_route_reacquisitions,N/A,18,highest reacquisition count in the dataset; still never converges to origin
+DEV02,920265301,1,delivery_count,0,0,unchanged
+DEV02,920265301,1,depleted,False,False,unchanged
+DEV02,920265301,1,distance_m,45.5,48.0,essentially unchanged
+DEV02,920265301,1,working_memory_route_reacquisitions,N/A,1,minimal reacquisition; failure mode now closer to a genuine long/hard retrace than a deadlock
+DEV02,920265301,2,delivery_count,0,0,unchanged
+DEV02,920265301,2,depleted,True,False,IMPROVED -- no longer depletes (previously the clearest F4 case: wandered 271.8m, ended 9.06m from origin)
+DEV02,920265301,2,distance_m,277.5,31.4,dramatic reduction -- old F4 untargeted wandering is gone
+DEV02,920265301,2,working_memory_route_reacquisitions,N/A,0,F3 mechanism never needed to engage -- confirms this scout's failure is now purely the origin-not-Nest gap (Part L), not a WM defect
+DEV03,652974033,ALL,mission_outcome,TIME_LIMIT_REACHED,TIME_LIMIT_REACHED,unchanged
+DEV03,652974033,ALL,nest_energy_units,0.260,0.813,improved net Nest energy despite fewer gross deliveries (less mid-cycle withdrawal churn)
+DEV03,652974033,ALL,gross_delivered_energy,6.000,1.000,large reduction in delivery count within the horizon
+DEV03,652974033,ALL,return_attempts,9,4,fewer cycles completed in 3600s (each return now takes much longer)
+DEV03,652974033,ALL,nest_reaches,6,1,regressed
+DEV03,652974033,0,delivery_count,3,1,previously the most productive scout in this dataset; now completes far fewer cycles
+DEV03,652974033,0,depleted,False,False,unchanged
+DEV03,652974033,0,distance_m,410.6,120.5,large reduction in total distance travelled
+DEV03,652974033,0,working_memory_prunes,259,0,prunes eliminated
+DEV03,652974033,0,working_memory_route_reacquisitions,N/A,14,engaged repeatedly
+DEV03,652974033,1,delivery_count,3,0,regressed -- previously succeeded 3/3 attempts, now 0/1 (only one return attempted before TIME_LIMIT)
+DEV03,652974033,1,depleted,False,False,unchanged
+DEV03,652974033,1,distance_m,329.8,72.8,large reduction in total distance travelled
+DEV03,652974033,1,working_memory_prunes,122,0,prunes eliminated
+DEV03,652974033,1,working_memory_route_reacquisitions,N/A,6,engaged repeatedly
+DEV03,652974033,2,delivery_count,0,0,unchanged
+DEV03,652974033,2,depleted,True,False,IMPROVED -- no longer depletes (previously the second clearest F4 case: wandered 254.0m, ended 6.27m from origin)
+DEV03,652974033,2,distance_m,268.6,46.3,dramatic reduction
+DEV03,652974033,2,working_memory_route_reacquisitions,N/A,0,F3 mechanism never needed to engage -- confirms this scout's failure is now purely the origin-not-Nest gap (Part L), not a WM defect
