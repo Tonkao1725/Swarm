@@ -1,13 +1,41 @@
 # C1/C2 Research Freeze Manifest
 
+**v2 metadata/provenance correction (2026-08-28)**: this manifest and
+`config/c1_c2_research_freeze_manifest.json` are versioned as
+`research-c1-c2-common-v2`. v2 corrects exactly two issues found in v1
+(commit `4498bf4ac28dcc9553b3744598cab2d927826dde`, tag
+`research-c1-c2-common-v1`, **left unmoved and unmodified -- see
+`docs/C2_PRE_FREEZE_REVIEW.md` history**):
+1. This manifest's own self-referential `freeze_commit_sha` placeholder
+   (see "Freeze commit resolution" below for the corrected,
+   non-self-referential scheme).
+2. `config/nest_beacon_hardware_profile.json`'s stale
+   `tx_power_datasheet_min_dbm = -12.0` field (removed, not replaced --
+   see `docs/NEST_BEACON_HARDWARE_PROFILE.md`).
+
+**Behavioral source is byte-identical between v1 and v2** -- confirmed by
+SHA-256 (see table below). No controller/WM/Home/RSSI/Solar/S4 behavior
+was changed by this correction.
+
 **Freeze date**: 2026-08-28
 **Branch**: `c2-working-memory-dev-20260827`
-**Pre-freeze parent SHA**: `818c64f2729a38871447526d8b42090d867dad14`
-**Freeze commit SHA**: see `docs/C1_C2_RESEARCH_FREEZE_MANIFEST.md` update /
-`config/c1_c2_research_freeze_manifest.json` after commit (this file is
-authored before the commit exists; the exact SHA is reported in the final
-task response and in `git log`).
-**Tag**: `research-c1-c2-common-v1` (annotated, on the freeze commit)
+**Source parent freeze commit**: `4498bf4ac28dcc9553b3744598cab2d927826dde`
+(`research-c1-c2-common-v1`)
+
+## Freeze commit resolution (non-self-referential)
+
+A commit's manifest cannot embed that same commit's own resulting SHA --
+changing the file to add the hash changes the hash. This file therefore
+never states its own commit SHA. The authoritative resolution is Git
+itself:
+
+```
+git rev-parse research-c1-c2-common-v2
+# or, for the annotated tag object's peeled ref:
+git rev-parse research-c1-c2-common-v2^{commit}
+```
+
+**Tag**: `research-c1-c2-common-v2` (annotated, on the metadata-correction commit)
 
 ## Environment
 
@@ -109,7 +137,44 @@ run in this task.
 | `src/swarm_simulate/nest_beacon_hardware.py` | `e40d9d65bdfb80d8e4ff4239d3c941aef5c4af50e0a3b4e662da775628f4d920` |
 | `src/swarm_simulate/energy_sensor.py` | `608befe45fe77c7a3b9a9c23c6d9b373bf642158a8e458e032d072a43ea3d3e1` |
 | `config/robot_world.yaml` | `8488b4425e939f9d1bc88716358265fc1e507d238789c078fa3c33ad5836ca0d` |
-| `config/nest_beacon_hardware_profile.json` | `01e4b4cf3209ccd4487b69ab2098ad579d03cd6f8626fbda1a812310df500577` |
+| `config/nest_beacon_hardware_profile.json` | `ee325474cabfb4cd5f5fe4822603723123e16074ba4d5eb58a15c77cfd9746a6` (v2 -- changed from v1's `01e4b4cf...df500577`, metadata correction only, see below) |
+
+**All six behavioral source files (`main.py` through `energy_sensor.py`)
+are byte-identical between v1 and v2** -- confirmed by direct SHA-256
+comparison before and after this correction. Only
+`config/nest_beacon_hardware_profile.json` (machine-readable RF provenance
+metadata, not behavioral code) changed.
+
+## RF provenance correction (v2)
+
+`config/nest_beacon_hardware_profile.json` previously retained
+`tx_power_datasheet_min_dbm = -12.0` (and a provenance entry for it) even
+though `nest_beacon_hardware.py`'s Python source had already removed the
+corresponding dataclass field. On review, that -12.0 dBm figure does not
+correspond to the ESP32-WROOM-32E Wi-Fi 802.11n HT40 MCS7 typical-TX-power
+row at all -- Espressif's official Table 20 reports 13.0 dBm for that row
+(802.11b 1 Mbps: 19.5 dBm; 802.11g 54 Mbps: 14.0 dBm; 802.11n HT20 MCS7:
+13.0 dBm; 802.11n HT40 MCS7: 13.0 dBm); -12 dBm instead belongs to
+Bluetooth RF power-control information, not the Wi-Fi MCS7 row.
+
+**Correction applied**: the field and its provenance entry were removed
+entirely from the JSON, matching the Python source. **Not** replaced with
+13.0 dBm, since that figure is itself a per-modulation/per-rate typical
+value, not a universal Wi-Fi module minimum -- stating it as a "TX
+minimum" would repeat the same category error. `tx_power_datasheet_max_dbm
+= 19.5` is retained (802.11b 1/11 Mbps typical TX reference, consistent
+between the WROOM-32E and classic WROOM-32 datasheets). The active
+development TX-power setting (`tx_power_esp_idf_units = 8`,
+`tx_power_dbm_reference = 2.0`) remains classified `ESP_IDF` (an
+ESP-IDF-configurable development setting, reproducible via
+`esp_wifi_set_max_tx_power(8)`), never conflated with a datasheet TX
+minimum.
+
+`geometry_basis` (real robot radius, `sim_to_real_linear_scale`, real/
+sim-scaled Nest dimensions) is now explicitly tagged
+`"classification": "OFFLINE_PHYSICAL_IMPLEMENTATION_REFERENCE"` in the
+JSON -- not an active behavioral simulation constraint (unchanged
+statement of fact from v1's prose, now machine-readable).
 
 ## Active Freeze regression gate (all PASS at freeze time)
 

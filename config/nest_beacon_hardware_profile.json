@@ -8,7 +8,6 @@
     "wifi_band_high_hz": 2484000000,
     "wifi_protocols": "802.11b/g/n",
     "tx_power_datasheet_max_dbm": 19.5,
-    "tx_power_datasheet_min_dbm": -12.0,
     "rx_sensitivity_dbm_reference": -97.0,
     "antenna": "on-board PCB antenna"
   },
@@ -23,6 +22,8 @@
     "propagation_model": "DEVELOPMENT PROPAGATION BASELINE -- deterministic free-space path loss (FSPL), no fading/shadowing term"
   },
   "geometry_basis": {
+    "classification": "OFFLINE_PHYSICAL_IMPLEMENTATION_REFERENCE",
+    "classification_note": "Not an active behavioral simulation constraint. Geometric Sim-to-Real scale equivalence is explicitly not required for the current behavioral study (docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md); swarm_baseline.py does not read sim_to_real_linear_scale or the sim_scaled_nest_* fields below. Retained only as a physical-implementation reference for future real-hardware design.",
     "real_robot_radius_m": 0.05,
     "real_robot_radius_source": "docs/sim_to_real_parameter_registry.json (robot_radius, CONFIRMED_PHYSICAL, user specification); cross-checked in docs/PHYSICAL_SCALE_AUDIT.md",
     "active_sim_robot_radius_m": 0.25,
@@ -77,17 +78,6 @@
       "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
       "classification": "DATASHEET",
       "cross_check": "Classic ESP32-WROOM-32 datasheet (NRND, v3.7) publishes the same 19.5 dBm maximum."
-    },
-    {
-      "parameter_name": "tx_power_datasheet_min_dbm",
-      "value": -12.0,
-      "unit": "dBm",
-      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
-      "document_version": "v2.1",
-      "source_section": "Section 7.1, Table 20 (TX Power) -- 802.11n, HT40, MCS7",
-      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
-      "classification": "DATASHEET",
-      "cross_check": "Classic ESP32-WROOM-32 datasheet (NRND, v3.7) instead publishes 13.0 dBm as its minimum (802.11n HT20/HT40 MCS7) -- the two published tables disagree at the low end; recorded here as found, not reconciled, since the exact purchased module variant is unverified (PROVISIONAL_UNTIL_BOARD_MARKING_VERIFIED)."
     },
     {
       "parameter_name": "rx_sensitivity_dbm_reference",

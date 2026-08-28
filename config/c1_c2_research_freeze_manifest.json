@@ -1,9 +1,13 @@
 {
+  "freeze_ref": "research-c1-c2-common-v2",
+  "freeze_commit_resolution": "AUTHORITATIVE_GIT_TAG",
+  "freeze_commit_resolution_note": "This manifest is committed together with the very commit it describes; that commit's own resulting SHA cannot be embedded inside this file without changing the SHA (self-reference is impossible for a content-addressed commit). Do NOT fill in a placeholder after the fact. The authoritative commit SHA is whatever `git rev-parse research-c1-c2-common-v2` (or the annotated tag object's peeled ref, `git rev-parse research-c1-c2-common-v2^{commit}`) resolves to -- Git itself is the source of truth, not this file.",
   "freeze_date": "2026-08-28",
+  "metadata_correction_date": "2026-08-28",
+  "metadata_correction_note": "v2 corrects two provenance/metadata issues only: (1) this manifest's own self-referential SHA placeholder, replaced with the non-self-referential scheme above; (2) config/nest_beacon_hardware_profile.json's stale tx_power_datasheet_min_dbm=-12.0 field and its provenance entry, removed (Wi-Fi typical-TX-power minimum for 802.11n MCS7 is 13.0 dBm per Espressif's official table; the removed -12.0 dBm figure belonged to Bluetooth RF power-control information, not the Wi-Fi MCS7 row -- not reintroduced as a replacement value, since 13.0 dBm is itself a per-rate typical figure, not a universal module minimum). Behavioral source is BYTE-IDENTICAL to v1 -- see source_sha256 below, unchanged from v1's own recorded values for all six behavioral files.",
   "branch": "c2-working-memory-dev-20260827",
-  "pre_freeze_parent_sha": "818c64f2729a38871447526d8b42090d867dad14",
-  "freeze_commit_sha": "PENDING_FILLED_AFTER_COMMIT",
-  "freeze_tag": "research-c1-c2-common-v1",
+  "source_parent_freeze_commit": "4498bf4ac28dcc9553b3744598cab2d927826dde",
+  "source_parent_freeze_tag": "research-c1-c2-common-v1",
   "environment": {
     "python": "3.13.7",
     "irsim": "2.10.1",
@@ -35,8 +39,9 @@
     "src/swarm_simulate/nest_beacon_hardware.py": "e40d9d65bdfb80d8e4ff4239d3c941aef5c4af50e0a3b4e662da775628f4d920",
     "src/swarm_simulate/energy_sensor.py": "608befe45fe77c7a3b9a9c23c6d9b373bf642158a8e458e032d072a43ea3d3e1",
     "config/robot_world.yaml": "8488b4425e939f9d1bc88716358265fc1e507d238789c078fa3c33ad5836ca0d",
-    "config/nest_beacon_hardware_profile.json": "01e4b4cf3209ccd4487b69ab2098ad579d03cd6f8626fbda1a812310df500577"
+    "config/nest_beacon_hardware_profile.json": "ee325474cabfb4cd5f5fe4822603723123e16074ba4d5eb58a15c77cfd9746a6"
   },
+  "source_sha256_note": "All six behavioral source files (main.py through energy_sensor.py) are byte-identical to their v1-recorded hashes -- this v2 correction changed no behavior. Only config/nest_beacon_hardware_profile.json's hash changed (metadata correction, see metadata_correction_note above).",
   "active_freeze_gate": {
     "HOME-1..15": {"file": "tests/validate_c2_boot_home_confirmation.py", "result": "PASS"},
     "PORT-1..12": {"file": "tests/validate_sim_to_real_portability.py", "result": "PASS"},
@@ -53,6 +58,7 @@
     "rssi_state_reset": {"file": "tests/validate_rssi_state_reset.py", "result": "PASS"},
     "persistent_stationary_turn_deadlock": {"file": "tests/validate_persistent_stationary_turn_deadlock.py", "result": "PASS"}
   },
+  "active_freeze_gate_note": "Rerun clean at v2 metadata-correction time (unchanged results from v1, since behavioral source is byte-identical -- no DEV01-03 rerun was required or performed for this metadata-only correction).",
   "preserved_non_active_tests": {
     "tests/validate_c1_rssi_boundaries.py": "STALE_TEST",
     "tests/validate_physical_scale_geometry.py": "PHYSICAL_FIDELITY_FUTURE_HARDWARE_VALIDATION",
@@ -69,5 +75,5 @@
     "geometric_sim_to_real_scale_equivalence_not_required_for_current_behavioral_study",
     "nodemcu_module_profile_provisional_until_board_marking_verified"
   ],
-  "statement": "Final C1 (R01-R20) and final C2 (R01-R20) research datasets must both be generated from this exact freeze commit/tag so the two Conditions remain comparable under identical common infrastructure. Neither was run as part of this Freeze task."
+  "statement": "Final C1 (R01-R20) and final C2 (R01-R20) research datasets must both be generated from this exact v2 freeze commit/tag (behaviorally identical to v1) so the two Conditions remain comparable under identical common infrastructure. Neither was run as part of this or the prior Freeze task."
 }

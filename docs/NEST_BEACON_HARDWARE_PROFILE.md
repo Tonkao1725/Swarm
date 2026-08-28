@@ -8,12 +8,18 @@ described in §G/§H below in its active causal path -- that conversion
 (`sim_to_real_linear_scale`, `DevelopmentFreeSpacePathLossModel`,
 `RectangularNestRegion`) is now OFFLINE/METADATA ONLY. See
 `docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md` and
-`tests/SIM_TO_REAL_PORTABILITY_REPORT.md`. Also corrected: the
-`tx_power_datasheet_min_dbm` claim below has been removed from the active
-profile (see that report's "Refactor performed" §5) -- the datasheet's
-Table 20 lists per-modulation/rate typical output power, not a single
-scalar minimum, and the two extracted candidate figures could not be
-reconciled with confidence.
+`tests/SIM_TO_REAL_PORTABILITY_REPORT.md`.
+
+**2026-08-28 provenance correction (freeze v2):** the `tx_power_datasheet_min_dbm`
+field/table row previously in this document was corrected in prose at the
+time of the Sim-to-Real task above, but `config/nest_beacon_hardware_profile.json`
+and this document's own table (§C) were not actually updated then --
+`docs/C1_C2_RESEARCH_FREEZE_MANIFEST.md` "RF provenance correction (v2)"
+now completes that correction in both files. The originally-recorded
+`-12.0 dBm` figure was a data-extraction error: it does not correspond to
+the ESP32-WROOM-32E Wi-Fi 802.11n HT40 MCS7 typical-TX-power row at all --
+that figure belongs to Bluetooth RF power-control information, not the
+Wi-Fi table. §C below is now corrected accordingly.
 
 Status: DEVELOPMENT. `hardware_profile_status = PROVISIONAL_UNTIL_BOARD_MARKING_VERIFIED`.
 Machine-readable record: `config/nest_beacon_hardware_profile.json`.
@@ -69,8 +75,7 @@ document, version, section/table, URL, classification). Summary:
 | --- | --- | --- |
 | Wi-Fi band | 2412–2484 MHz | DATASHEET |
 | Protocols | 802.11b/g/n | DATASHEET |
-| TX power, datasheet max | 19.5 dBm | DATASHEET |
-| TX power, datasheet min | -12.0 dBm (WROOM-32E, 802.11n HT40 MCS7) | DATASHEET |
+| TX power, datasheet max | 19.5 dBm (802.11b, 1/11 Mbps) | DATASHEET |
 | RX sensitivity (reference) | -97.0 dBm (802.11b, 1 Mbps) | DATASHEET |
 | ESP-IDF TX-power unit | 0.25 dBm/step | ESP_IDF |
 | ESP-IDF TX-power selected | raw unit 8 → 2.0 dBm | ESP_IDF |
@@ -79,14 +84,20 @@ document, version, section/table, URL, classification). Summary:
 | System loss | 0 dB | DEVELOPMENT_ASSUMPTION (neutral) |
 | Home signal threshold | derived, dBm | PHYSICAL_MEASUREMENT_PENDING |
 
-**Cross-check discrepancy, disclosed not reconciled:** the classic
-ESP32-WROOM-32 (NRND) datasheet publishes a *minimum* TX power of
-+13.0 dBm (802.11n HT20/HT40 MCS7), while the current WROOM-32E/32UE
-datasheet publishes -12.0 dBm for the same mode. Both are recorded in
-`config/nest_beacon_hardware_profile.json` as found; not reconciled, since
-the exact purchased module variant is unverified. This does not affect the
-adopted TX-power *reference* value (2.0 dBm, from the ESP-IDF API table,
-not from either datasheet's min/max range) used by the propagation model.
+**No single "TX power, datasheet min" field is recorded.** Espressif's
+Table 20 (Wi-Fi RF Characteristics) reports *typical* TX output power per
+modulation/rate, not a single module-wide minimum: 802.11b 1 Mbps
+19.5 dBm; 802.11g 54 Mbps 14.0 dBm; 802.11n HT20 MCS7 13.0 dBm; 802.11n
+HT40 MCS7 13.0 dBm. Recording any one of these as "the minimum" would
+misrepresent a per-rate typical value as a module-wide bound -- the
+previously-recorded `-12.0 dBm` figure was worse than that: a
+data-extraction error unrelated to this table entirely (Bluetooth RF
+power-control information, not Wi-Fi). Only the unambiguous, consistently
+published maximum (19.5 dBm, 802.11b 1/11 Mbps, agreeing between the
+WROOM-32E and classic WROOM-32 datasheets) is kept as a machine-readable
+field. This does not affect the adopted TX-power *reference* value used by
+the propagation model (2.0 dBm, from the separately-sourced ESP-IDF API
+table, never from this datasheet table at all).
 
 ## D. TX power selection
 
