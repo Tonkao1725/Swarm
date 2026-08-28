@@ -1,0 +1,3 @@
+dev,scout_id,phase,action,run_len_ticks,t_start,t_end,duration_s,x_m,y_m,escaped,reached_home,classification,note
+DEV01,0,EXPLORE,SOLAR_TURN_45,17177,1882.3,3600.0,1717.7,11.5109,7.8681,NO,NO,NEW_DEFECT_NOT_S4_EXPLORE_PHASE_SOLAR_TURN_DEADLOCK,"Caused INVALID_CONTROLLER_CONTACT_FAILURE for the whole DEV01 run. EXPLORE-phase, not Return/WM -- outside C2 Return scope."
+DEV02,1,RETURN_HOME,WM_RETRACE_TURN_45 / OBSTACLE_ESCAPE* cycle (12x WM_ROUTE_REACQUIRE),n/a (12 separate ~177s sub-cycles),1353.6,3430.3,2076.7,~fixed (bbox 0.02-0.13m),~fixed,NO,NO,S4_REPRODUCED,"12 consecutive WM_ROUTE_REACQUIRE, all NO_EFFECT; 13 WM entries consumed with zero net spatial progress; textbook S4 recurrence, same mechanism as pre-architecture diagnosis."

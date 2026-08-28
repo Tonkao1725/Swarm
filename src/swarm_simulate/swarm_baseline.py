@@ -23,6 +23,8 @@ from energy_sensor import RandomEndpointEnergySensor
 from irsim_range_sensor import IRSimDirectionalRangeSensor
 from motion_types import RobotPose
 from c2_working_memory import CycleWorkingMemory, wrap as _wm_wrap
+from nest_beacon_hardware import NODEMCU_ESP32_WROOM32_PROFILE, SimulatedNestRSSIModel
+from home_observation import HomeObservation, HomeConfirmationPolicy
 
 
 def _wrap(angle: float) -> float:
@@ -42,6 +44,13 @@ class ScoutState:
     started_trip_count: int = 1
     turn_remaining_rad: float = 0.0
     turn_reason: str = ""
+    # Current-actuator-maneuver state only (identical in kind to
+    # escape_direction/turn_remaining_rad below): true for exactly one
+    # decision tick, immediately after a SOLAR_TURN_45 primitive completes,
+    # to require one fresh-geometry forward/progress attempt before solar
+    # guidance is re-arbitrated. It is never a location, a route, or
+    # cross-tick/cross-cycle memory -- see _explore_command.
+    solar_turn_progress_pending: bool = False
     # This is actuator state for one current obstacle-escape maneuver only.
     # It is cleared as soon as the current front geometry is traversable and
     # is never used as branch, route, or cross-trip information.
@@ -113,25 +122,93 @@ class ScoutState:
     wm_target_lock_y_m: float = 0.0
     wm_stuck_ticks: int = 0
     wm_route_reacquisition_count: int = 0
+    # S4 correction only: a bounded, Return-specific committed local
+    # obstacle escape. When the WM heading arbitration finds forward
+    # motion toward the active breadcrumb unsafe, this suspends heading
+    # re-arbitration (and, structurally, wm_stuck_ticks accounting -- see
+    # _return_command) until the Scout has physically displaced at least
+    # self.return_obstacle_escape_min_translation_m (a physical/body
+    # quantity -- deliberately NOT a WM storage parameter such as
+    # memory.spacing_m; see tests/C2_PRE_FREEZE_REVIEW.md) from where the
+    # escape began, or a bounded number of escape attempts is exhausted. This is
+    # current-actuator-maneuver state only (same kind as escape_direction
+    # above): a local-frame start position and an attempt counter, reset
+    # on completion. It never stores an obstacle identity, a place, a
+    # route, or cross-cycle/cross-trip information, and is read only
+    # inside the working_memory_enabled branch of _return_command.
+    return_obstacle_escape_active: bool = False
+    return_obstacle_escape_start_x_m: float = 0.0
+    return_obstacle_escape_start_y_m: float = 0.0
+    return_obstacle_escape_attempts: int = 0
+    # Boot/Home confirmation (common infrastructure -- C1 and C2 alike).
+    # True only after this Scout's spawn pose has passed both the physical
+    # Home-region containment check and the RSSI Home-confirmation
+    # threshold; see BaselineSwarmRunner._environment_home_confirmed.
+    boot_home_confirmed: bool = False
 
 
 @dataclass(frozen=True)
-class IdealizedRSSILikeNestBeacon:
-    """Environment-owned common Nest beacon.
+class ESP32NestBeaconModel:
+    """Environment-owned common Nest beacon SIM ADAPTER -- REPLACES the
+    previous unitless `IdealizedRSSILikeNestBeacon` (2026-08-27, sim-to-real
+    RF hardware alignment task; see
+    docs/ESP32_WROOM32_RSSI_SIM_TO_REAL_MODEL.md and
+    docs/NEST_BEACON_HARDWARE_PROFILE.md).
 
-    The environment retains the physical nest position solely to synthesize a
-    deterministic scalar measurement.  The behavioral controller receives
-    only the return value of :meth:`sample`, never this object or its x/y.
-    Values are unitless and intentionally are not claimed as calibrated dBm.
+    This is the SIMULATION side of the Home-observation boundary: it
+    produces a dBm-compatible RSSI scalar from simulation geometry via
+    `nest_beacon_hardware.SimulatedNestRSSIModel` -- a SIMULATED RSSI
+    SENSOR MODEL, not a claim of matching the real NodeMCU Beacon's RSSI
+    at the same physical distance (Sim-to-Real here means shared
+    CONTROLLER CODE, not matched geometry -- see
+    docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md). No geometric
+    sim-to-real scale conversion appears in this class's causal path
+    (Test PORT-1).
+
+    The environment retains the physical nest position solely to compute
+    the distance fed to the sensor model. The behavioral controller
+    receives only the return value of :meth:`sample` (or
+    :meth:`sample_at_distance`), never this object, its x/y, a bearing, or
+    a distance. A real deployment would instead read the ESP32's actual
+    RSSI directly (`home_observation.RealHomeAdapterStub`).
+
+    SIMULATION: this dBm value is a deterministic analytical estimate,
+    intentionally omitting fading/shadowing/wall-attenuation noise (none
+    is added without sourced measurement data). Real Wi-Fi may diffract
+    around or penetrate maze walls in ways this free-space model does not
+    capture -- and simulation distance is not required to correspond to
+    any specific real-world distance.
+    REAL ROBOT: the Nest ESP32 transmits an actual physical Beacon; the
+    Scout's radio reports true RSSI in dBm, subject to real multipath,
+    attenuation, and noise this development model does not model. Any
+    Home-confirmation threshold used on real hardware must be calibrated
+    empirically from the physical Nest hardware/environment (see "Future
+    physical calibration plan" in docs/NEST_BEACON_HARDWARE_PROFILE.md),
+    independently of whatever threshold the simulation uses.
     """
 
     nest_x_m: float
     nest_y_m: float
-    scale_m: float = 2.0
+    propagation: SimulatedNestRSSIModel
+
+    def sample_at_distance(self, distance_sim_m: float) -> float:
+        return self.propagation.received_power_dbm(distance_sim_m)
 
     def sample(self, pose: RobotPose) -> float:
         distance = math.hypot(pose.x_m - self.nest_x_m, pose.y_m - self.nest_y_m)
-        return 1.0 / (1.0 + distance / self.scale_m)
+        return self.sample_at_distance(distance)
+
+
+# Common infrastructure (identical for C1 and C2): the Nest/Home is defined
+# by the environment's own configured Scout start layout, not read back from
+# any specific Scout's simulated pose.  These are the same coordinates
+# `_add_scouts` places Scouts at; keeping one source of truth removes the
+# previous "Nest position = Scout0's spawn pose" dependency.
+_ROBOT_RADIUS_M = 0.25
+_SCOUT_START_STATES = [
+    [1.00, 1.00, 0.0], [1.80, 1.00, 0.0], [2.60, 1.00, 0.0],
+    [3.35, 1.00, 0.0],
+]
 
 
 class BaselineSwarmRunner:
@@ -181,6 +258,16 @@ class BaselineSwarmRunner:
         # This is distinct from forward stopping distance: it guards a
         # requested 45° body turn from clipping the turn-side obstacle.
         self.turn_side_clearance_m = 0.42
+        # HISTORICAL / UNUSED BY CONFIRMATION LOGIC: this was previously the
+        # tight arrival-point radius used by _environment_nest_reached.
+        # Audited (tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md): it never
+        # represented a real physical docking mechanism -- only a historical
+        # arrival-point approximation -- and there is no requirement that a
+        # Scout return to one tiny docking point. Nest arrival now uses the
+        # single canonical _environment_home_confirmed predicate
+        # (self.home_region_radius_m + self.home_signal_threshold) instead.
+        # Kept defined, unused, only so any external reference to this
+        # attribute name does not break.
         self.nest_delivery_radius_m = 0.12
         self.turn_angle_rad = math.radians(45.0)
         self.angular_speed_radps = 0.90
@@ -200,6 +287,18 @@ class BaselineSwarmRunner:
         # maneuver. A second scan without any departure must yield/back off;
         # otherwise two nearby bodies can keep each other in clearance limbo.
         self.escape_turn_limit = 8
+        # S4 correction (Return committed-obstacle-escape): the minimum
+        # physical displacement required to consider a local obstacle
+        # conflict genuinely escaped. This is deliberately a body/physical
+        # quantity -- the robot's own radius -- not a Working Memory
+        # storage parameter. WM breadcrumb spacing (memory.spacing_m) and
+        # this physical clearance distance are different concepts and must
+        # not be coupled: changing one must never implicitly change the
+        # other (see tests/C2_PRE_FREEZE_REVIEW.md, Test FREEZE-1). The
+        # numeric value is unchanged from the prior implementation
+        # (0.25 m) because it happens to equal _ROBOT_RADIUS_M, not
+        # because of any dependency on it.
+        self.return_obstacle_escape_min_translation_m = _ROBOT_RADIUS_M
         # Display-only marker for visual replay.  It has no IR-SIM body and
         # never participates in collision, sensing, or controller state.
         self._display_energy_markers: list[Circle] = []
@@ -214,10 +313,56 @@ class BaselineSwarmRunner:
         # This is environment-only geometry.  It is used to synthesize a
         # common scalar RSSI-like signal and to score physical Nest arrival;
         # no Scout/controller receives the position, bearing, or distance.
-        nest_pose = self._pose(env, 0)
-        self._nest_beacon = IdealizedRSSILikeNestBeacon(
-            nest_x_m=nest_pose.x_m, nest_y_m=nest_pose.y_m,
+        #
+        # The Nest/Home center is derived from the environment's own
+        # configured Scout start layout (the same _SCOUT_START_STATES
+        # _add_scouts placed Scouts at), NOT read back from any specific
+        # Scout's simulated pose.  Previously this read `self._pose(env, 0)`
+        # (Scout0's post-spawn pose), making the Nest position an accidental
+        # function of Scout0's identity.  See
+        # docs/COMMON_NEST_INITIALIZATION_DESIGN.md.
+        nest_x_m, nest_y_m = self._home_center()
+        # Hardware profile: NodeMCU ESP32-class Nest Beacon (classic
+        # ESP32-WROOM-32 radio profile), PROVISIONAL_UNTIL_BOARD_MARKING_VERIFIED
+        # -- see docs/NEST_BEACON_HARDWARE_PROFILE.md. This is a REAL
+        # HARDWARE REFERENCE record, kept for the eventual real-robot
+        # implementation; the ACTIVE simulation RSSI model below does NOT
+        # apply any geometric sim-to-real scale conversion (Sim-to-Real
+        # here means shared controller CODE, not matched geometry -- see
+        # docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md, Test PORT-1/PORT-11).
+        self.hardware_profile = NODEMCU_ESP32_WROOM32_PROFILE
+        self._nest_beacon = ESP32NestBeaconModel(
+            nest_x_m=nest_x_m, nest_y_m=nest_y_m,
+            propagation=SimulatedNestRSSIModel(profile=self.hardware_profile),
         )
+        # ONE canonical Home/Nest confirmation geometry, reused for Boot,
+        # Return arrival, and depleted-at-Nest restoration alike
+        # (`_environment_home_confirmed` -- docs/COMMON_NEST_INITIALIZATION_DESIGN.md,
+        # tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md). self.home_region_radius_m
+        # is derived, not guessed, from the actual configured Scout start
+        # layout and robot radius -- this is the simulation's OWN
+        # experimentally appropriate NestRegion; it is not, and is not
+        # required to be, a scaled mapping of the real 25x25 cm Nest (see
+        # docs/NEST_BEACON_HARDWARE_PROFILE.md "Nest 25x25 cm status").
+        # self.home_signal_threshold is a SIMULATION_DEVELOPMENT_THRESHOLD
+        # (dBm), derived so every point on that boundary also satisfies
+        # RSSI confirmation -- NOT a real NodeMCU hardware threshold. This
+        # is explicitly DEVELOPMENT/PROVISIONAL geometry (a circle, not a
+        # formally specified physical Nest boundary) -- verified safe
+        # against the current maze's walls (no reachable point inside this
+        # radius requires crossing a wall), but not frozen as a final
+        # research Nest shape. Every experimental Condition uses this same
+        # region (Test RF-10/PORT-10).
+        starts_used = _SCOUT_START_STATES[: self.scout_count]
+        self.home_region_radius_m = (
+            max(math.hypot(s[0] - nest_x_m, s[1] - nest_y_m) for s in starts_used)
+            + _ROBOT_RADIUS_M
+        )
+        self.home_signal_threshold = self._nest_beacon.sample_at_distance(self.home_region_radius_m)
+        # PORTABLE_CORE: the actual Home-confirmed decision logic. Contains
+        # no IR-SIM/world-pose/hardware-profile dependency -- see
+        # home_observation.py and docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md.
+        self._home_policy = HomeConfirmationPolicy(threshold_dbm=self.home_signal_threshold)
         self.scouts = [
             ScoutState(
                 scout_id=i,
@@ -232,11 +377,10 @@ class BaselineSwarmRunner:
     def _add_scouts(self) -> None:
         # These are separated start locations within the common nest-side
         # corridor.  Each Scout receives the same stateless nest-cue mechanism
-        # that the pre-existing single-robot baseline uses.
-        starts = [
-            [1.00, 1.00, 0.0], [1.80, 1.00, 0.0], [2.60, 1.00, 0.0],
-            [3.35, 1.00, 0.0],
-        ]
+        # that the pre-existing single-robot baseline uses.  Shared with the
+        # environment-owned Nest/Home center computation (_home_center) so
+        # there is exactly one source of truth for where Scouts are placed.
+        starts = _SCOUT_START_STATES
         if self.scout_count > len(starts):
             raise ValueError("Baseline swarm currently supports at most 4 Scouts")
         self.env.robot_list[0]._state = np.asarray(starts[0], dtype=float).reshape(3, 1)
@@ -244,7 +388,7 @@ class BaselineSwarmRunner:
         for scout_id, state in enumerate(starts[1:self.scout_count], start=1):
             extras.append(self.env.create_robot(
                 name=f"Scout-{scout_id}", kinematics={"name": "diff"},
-                shape={"name": "circle", "radius": 0.25}, state=state,
+                shape={"name": "circle", "radius": _ROBOT_RADIUS_M}, state=state,
                 vel_max=[0.80, 1.00], color=["b", "m", "c"][scout_id - 1],
                 sensors=[{"name": "lidar2d", "range_min": 0.05, "range_max": 5.0,
                           "angle_range": math.pi, "number": 181, "noise": False,
@@ -321,6 +465,66 @@ class BaselineSwarmRunner:
     def _pose(env, scout_id: int) -> RobotPose:
         value = np.asarray(env.robot_list[scout_id]._state, dtype=float).reshape(-1)
         return RobotPose(float(value[0]), float(value[1]), float(value[2]))
+
+    def _home_center(self) -> tuple[float, float]:
+        """Environment-owned Nest/Home center: the centroid of the actual
+        configured Scout start layout for this run's scout_count.
+
+        This is a compile-time-known geometric constant derived from
+        `_SCOUT_START_STATES`, not a value read back from any specific
+        Scout's simulated pose -- removing the previous accidental
+        dependency on Scout0's identity/pose.  See
+        docs/COMMON_NEST_INITIALIZATION_DESIGN.md.
+        """
+        starts_used = _SCOUT_START_STATES[: self.scout_count]
+        cx = sum(s[0] for s in starts_used) / len(starts_used)
+        cy = sum(s[1] for s in starts_used) / len(starts_used)
+        return cx, cy
+
+    def _environment_home_confirmed(self, pose: RobotPose) -> tuple[bool, float, bool]:
+        """SIM ADAPTER + PORTABLE_CORE call site -- the ONE canonical
+        Home/Nest confirmation path (common infrastructure -- C1 and C2
+        alike). Reused verbatim for:
+          - Boot/Home confirmation (`.run()`'s pre-loop sequence)
+          - Return arrival (`_environment_nest_reached`)
+          - depleted-at-Nest restoration (`_depleted_scout_can_be_restored`,
+            via `_environment_nest_reached`)
+        so no code path can drift onto a slightly different Home rule.
+
+        This method is the SIM ADAPTER: it is the only place world pose
+        and the Nest beacon/region are read to build a `HomeObservation`
+        (`nest_presence`, `rssi_dbm`). The actual HOME_CONFIRMED decision
+        is then made by `self._home_policy.evaluate(...)`
+        (`home_observation.HomeConfirmationPolicy`) -- backend-independent
+        code with no IR-SIM or world-coordinate dependency (Test
+        PORT-3/PORT-8). A real deployment would build the same
+        `HomeObservation` from real sensors/radio (see
+        `home_observation.RealHomeAdapterStub`) and hand it to the exact
+        same policy class.
+
+        Returns (home_confirmed, rssi_scalar, physical_region_ok) for
+        backward-compatible call-site/event-logging use; the caller
+        receives only these three values, never the beacon object, its
+        x/y, a bearing, or a distance -- RSSI is confirmation-only and
+        never steers navigation (Test HOME-4/HOME-13, RF-9/PORT-6/PORT-7).
+
+        self.home_region_radius_m is the simulation's OWN experimentally
+        appropriate NestRegion (a circle derived from the configured Scout
+        start layout) -- it is NOT required to be a scaled mapping of the
+        real 25x25 cm Nest (docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md). It
+        is verified, by direct line-of-sight sampling against the actual
+        maze wall geometry, to contain no point that requires crossing a
+        wall to reach from the Nest center in the CURRENT maze
+        (`config/robot_world.yaml`) -- not a general guarantee for a
+        different maze or radius.
+        """
+        nest_presence = math.hypot(
+            pose.x_m - self._nest_beacon.nest_x_m, pose.y_m - self._nest_beacon.nest_y_m
+        ) <= self.home_region_radius_m
+        rssi = self._nest_beacon.sample(pose)
+        observation = HomeObservation(nest_presence=nest_presence, rssi_dbm=rssi)
+        home_confirmed = self._home_policy.evaluate(observation)
+        return home_confirmed, rssi, nest_presence
 
     def _start_turn(self, scout: ScoutState, direction: float, reason: str) -> None:
         scout.turn_remaining_rad = direction * self.turn_angle_rad
@@ -508,9 +712,31 @@ class BaselineSwarmRunner:
         # a safe forward direction, then its state is immediately discarded.
         if scout.escape_direction != 0.0:
             return self._obstacle_escape_command(scout, snapshot)
-        if reading.guidance_active and reading.strongest_direction != "CENTER":
+        # A SOLAR_TURN_45 primitive that just completed must not be
+        # immediately followed by another solar-guidance arbitration: at a
+        # position where LEFT/RIGHT solar intensity is nearly equal, a
+        # completed turn can make the *other* side read strongest, and
+        # re-arbitrating before any translation occurs recreates the exact
+        # geometry that triggered the first turn -- an unbounded stationary
+        # turn-only limit cycle (confirmed in
+        # tests/SOLAR_TURN_EXPLORE_DEADLOCK_DIAGNOSIS.md: 17,177 consecutive
+        # ticks, zero net translation). Requiring one committed,
+        # safety-gated forward attempt first changes the Scout's position
+        # before solar guidance is read again, which a same-position
+        # re-arbitration can never do. This flag is current-actuator-tick
+        # state only (see ScoutState.solar_turn_progress_pending) -- no
+        # location, route, or cross-tick memory is stored.
+        if scout.solar_turn_progress_pending:
+            scout.solar_turn_progress_pending = False
+            if self._forward_body_clearance_safe(snapshot, sensor):
+                return self.linear_speed_mps, 0.0, "SOLAR_TURN_PROGRESS_FORWARD"
+            # Not safe to commit forward this tick -- fall through to the
+            # unmodified obstacle-safety branches below, exactly as if no
+            # solar turn had just completed.
+        elif reading.guidance_active and reading.strongest_direction != "CENTER":
             direction = 1.0 if reading.strongest_direction == "LEFT" else -1.0
             self._start_turn(scout, direction, "SOLAR_TURN_45")
+            scout.solar_turn_progress_pending = True
             return self._continue_turn(scout)
         # The front pair alone cannot prevent two circular Scouts from
         # side-swiping while their headings cross.  The same live side
@@ -572,6 +798,8 @@ class BaselineSwarmRunner:
             if memory.pop_if_reached(scout.cycle_id):
                 scout.wm_target_lock = None
                 scout.wm_stuck_ticks = 0
+                scout.return_obstacle_escape_active = False
+                scout.return_obstacle_escape_attempts = 0
                 return 0.0, 0.0, "WM_POP_RETRACE"
             # F4 correction: the final current-cycle breadcrumb (the local
             # origin) is a valid retrace target on its own.  The previous
@@ -589,6 +817,53 @@ class BaselineSwarmRunner:
             # one step early.
             target = memory.return_target(scout.cycle_id)
             if target is not None:
+                # S4 correction: a committed local obstacle escape in
+                # progress must run to completion (or exhaust its bounded
+                # attempt budget) before WM heading is re-arbitrated. The
+                # original defect: a single blocked-forward tick handed
+                # control to the generic obstacle-escape branches below,
+                # which could clear after as little as one
+                # OBSTACLE_ESCAPE_FORWARD tick (~0.022 m) -- nowhere near
+                # enough to leave a tight conflict pocket -- after which
+                # WM immediately re-requested the *same* heading toward
+                # the *same* target, recreating the identical blocked
+                # geometry.  Confirmed directly in
+                # tests/C2_S4_RETURN_LIMIT_CYCLE_DIAGNOSIS.md: DEV02
+                # Scout1 stayed inside a 0.02-0.13 m pocket for 2076.7 s
+                # this way. Requiring at least
+                # self.return_obstacle_escape_min_translation_m of net
+                # local displacement before resuming heading arbitration
+                # means a same-position re-arbitration can no longer
+                # occur. This is a PHYSICAL/body clearance quantity (the
+                # robot's own radius), deliberately NOT
+                # memory.spacing_m -- WM breadcrumb spacing is a storage
+                # parameter, not a physical escape distance, and the two
+                # must not be coupled (tests/C2_PRE_FREEZE_REVIEW.md, Test
+                # FREEZE-1). Ticks spent here never reach the
+                # wm_target_lock/wm_stuck_ticks block below, so they are
+                # never counted as "WM attempted this target and made no
+                # progress" -- a safety maneuver is not the same thing as
+                # a failed WM guidance attempt.
+                if scout.return_obstacle_escape_active:
+                    escaped = math.hypot(
+                        memory.x_m - scout.return_obstacle_escape_start_x_m,
+                        memory.y_m - scout.return_obstacle_escape_start_y_m,
+                    ) >= self.return_obstacle_escape_min_translation_m
+                    if escaped or scout.return_obstacle_escape_attempts >= self.escape_turn_limit:
+                        # Either genuinely clear of the conflict pocket, or
+                        # the bounded retry budget is exhausted -- resume
+                        # normal WM arbitration on the SAME target (never
+                        # skipped here); if it is still genuinely
+                        # unreachable, the existing, unmodified
+                        # wm_stuck_ticks / skip_unreachable bound below is
+                        # the only thing that may eventually move past it.
+                        scout.return_obstacle_escape_active = False
+                        scout.return_obstacle_escape_attempts = 0
+                    else:
+                        scout.return_obstacle_escape_attempts += 1
+                        return self._begin_clear_side_turn(
+                            scout, snapshot, "WM_OBSTACLE_ESCAPE_COMMITTED_45"
+                        )
                 # F3 correction: bounded current-cycle route reacquisition.
                 # If the active target has not yielded at least one
                 # breadcrumb-spacing (memory.spacing_m) of net local
@@ -630,6 +905,17 @@ class BaselineSwarmRunner:
                     return self._continue_turn(scout)
                 if self._forward_body_clearance_safe(snapshot, sensor):
                     return self.linear_speed_mps, 0.0, "WM_RETRACE_FORWARD"
+                # Forward toward the (already correctly-faced) WM target is
+                # unsafe: enter the committed escape above instead of
+                # falling through to the generic C1 branches below, so the
+                # next tick's re-arbitration is gated on real displacement.
+                scout.return_obstacle_escape_active = True
+                scout.return_obstacle_escape_start_x_m = memory.x_m
+                scout.return_obstacle_escape_start_y_m = memory.y_m
+                scout.return_obstacle_escape_attempts = 1
+                return self._begin_clear_side_turn(
+                    scout, snapshot, "WM_OBSTACLE_ESCAPE_COMMITTED_45"
+                )
         if snapshot.front_m <= self.safe_front_m:
             scout.blocked_count += 1
             return self._obstacle_escape_command(scout, snapshot)
@@ -647,13 +933,30 @@ class BaselineSwarmRunner:
         return self.linear_speed_mps, 0.0, "RETURN_LOCAL_FORWARD"
 
     def _environment_nest_reached(self, pose: RobotPose) -> bool:
-        """Environment-only physical Nest entry plus RSSI confirmation."""
-        physical_entry = math.hypot(
-            pose.x_m - self._nest_beacon.nest_x_m,
-            pose.y_m - self._nest_beacon.nest_y_m,
-        ) <= self.nest_delivery_radius_m
-        # The scalar is confirmation-only and is never supplied to movement.
-        return physical_entry and self._nest_beacon.sample(pose) >= 0.85
+        """Environment-only Return arrival check.
+
+        Uses the SAME canonical Home predicate as Boot confirmation
+        (`_environment_home_confirmed` -- Test HOME-14): physical
+        membership in the Home/Nest region AND RSSI confirmation. A Scout
+        does not need to return to its own cycle-departure point, or to
+        any other Scout's origin, or to the Nest centroid specifically --
+        only to *some* point inside the configured Home/Nest region with a
+        passing RSSI reading (Test HOME-9). Also used, via this same
+        method, by `_depleted_scout_can_be_restored`.
+
+        Historical note: this previously used a separate, much tighter
+        `nest_delivery_radius_m` (0.12 m) and `return_home_signal_threshold`
+        as a distinct "delivery point" rule. Per
+        docs/COMMON_NEST_INITIALIZATION_DESIGN.md and
+        tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md, that radius was audited
+        and found to represent only a historical arrival-point
+        approximation, not a real physical docking mechanism, so it is no
+        longer used here (kept as an unused, clearly-historical attribute
+        for backward compatibility only -- see `self.nest_delivery_radius_m`
+        in `__init__`).
+        """
+        home_confirmed, _rssi, _physical_region_ok = self._environment_home_confirmed(pose)
+        return home_confirmed
 
     def _command_for(
         self, scout: ScoutState, sensor: IRSimDirectionalRangeSensor,
@@ -812,6 +1115,45 @@ class BaselineSwarmRunner:
         for scout in self.scouts:
             scout.previous_pose = self._pose(self.env, scout.scout_id)
             scout.trip_start_s = 0.0
+            # Boot/Home confirmation (common infrastructure -- identical for
+            # C1 and C2).  A Scout's spawn position must never silently
+            # become its Home origin: it must first pass a physical
+            # Home-region containment check AND an RSSI Home-confirmation
+            # threshold, in that order, before anything cycle-local (WM
+            # included) is initialized.  See
+            # docs/COMMON_NEST_INITIALIZATION_DESIGN.md.
+            event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
+                                   "event": "SCOUT_BOOT", "detail": "boot_home_confirmation_pending"})
+            home_confirmed, rssi_scalar, physical_region_ok = self._environment_home_confirmed(scout.previous_pose)
+            event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
+                                   "event": "HOME_RSSI_SAMPLE",
+                                   "detail": f"rssi={rssi_scalar:.6f}; threshold={self.home_signal_threshold:.6f}"})
+            event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
+                                   "event": "HOME_PHYSICAL_REGION_CHECK",
+                                   "detail": f"inside_home_region={physical_region_ok}; home_region_radius_m={self.home_region_radius_m:.6f}"})
+            if not home_confirmed:
+                # Fail fast and clearly.  A Scout that does not start inside
+                # the configured Home region, or that fails RSSI
+                # confirmation there, must never have its spawn point
+                # silently accepted as Home -- that would record a false
+                # Home origin for the whole experiment.
+                for _f in (trajectory_file, event_file, trip_file, energy_timeline_file,
+                           robot_energy_file, transition_file, wm_file):
+                    _f.flush()
+                raise RuntimeError(
+                    "INVALID_INITIAL_HOME_STATE: "
+                    f"scout_id={scout.scout_id} home_confirmed=False "
+                    f"physical_region_ok={physical_region_ok} rssi={rssi_scalar:.6f} "
+                    f"home_signal_threshold={self.home_signal_threshold:.6f} "
+                    f"home_region_radius_m={self.home_region_radius_m:.6f}"
+                )
+            scout.boot_home_confirmed = True
+            event_writer.writerow({"sim_time_s": 0.0, "scout_id": scout.scout_id, "trip_id": 1,
+                                   "event": "HOME_CONFIRMED",
+                                   "detail": f"scout_id={scout.scout_id}; rssi={rssi_scalar:.6f}; "
+                                             f"threshold={self.home_signal_threshold:.6f}; "
+                                             f"physical_region_ok={physical_region_ok}; "
+                                             f"cycle_id={scout.cycle_id}"})
             if self.working_memory_enabled and scout.working_memory is not None:
                 scout.working_memory.start_cycle(scout.cycle_id)
                 scout.wm_last_logged_target_size = None
@@ -1069,7 +1411,7 @@ class BaselineSwarmRunner:
                 elif action == "NEST_REACHED":
                     event_writer.writerow({"sim_time_s": round(float(self.env.time), 6), "scout_id": scout.scout_id,
                                            "trip_id": scout.trip_id, "event": "NEST_REACHED",
-                                           "detail": "within_nest_delivery_radius"})
+                                           "detail": "physical_home_region_and_rssi_confirmed"})
                 elif action == "DELIVER":
                     delivered_trip_id = scout.trip_id - 1
                     nest_energy_before = self.nest_energy

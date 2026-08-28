@@ -1,0 +1,188 @@
+{
+  "profile_id": "NODEMCU_ESP32_WROOM32",
+  "board_family": "NodeMCU ESP32",
+  "radio_module": "ESP32-WROOM-32 (classic; NodeMCU-32S boards commonly carry this module)",
+  "profile_status": "PROVISIONAL_UNTIL_BOARD_MARKING_VERIFIED",
+  "hardware_parameters": {
+    "wifi_band_low_hz": 2412000000,
+    "wifi_band_high_hz": 2484000000,
+    "wifi_protocols": "802.11b/g/n",
+    "tx_power_datasheet_max_dbm": 19.5,
+    "tx_power_datasheet_min_dbm": -12.0,
+    "rx_sensitivity_dbm_reference": -97.0,
+    "antenna": "on-board PCB antenna"
+  },
+  "development_parameters": {
+    "wifi_channel": 6,
+    "center_frequency_hz": 2437000000,
+    "tx_power_esp_idf_units": 8,
+    "tx_power_dbm_reference": 2.0,
+    "tx_antenna_gain_dbi": 0.0,
+    "rx_antenna_gain_dbi": 0.0,
+    "system_loss_db": 0.0,
+    "propagation_model": "DEVELOPMENT PROPAGATION BASELINE -- deterministic free-space path loss (FSPL), no fading/shadowing term"
+  },
+  "geometry_basis": {
+    "real_robot_radius_m": 0.05,
+    "real_robot_radius_source": "docs/sim_to_real_parameter_registry.json (robot_radius, CONFIRMED_PHYSICAL, user specification); cross-checked in docs/PHYSICAL_SCALE_AUDIT.md",
+    "active_sim_robot_radius_m": 0.25,
+    "active_sim_robot_radius_source": "config/robot_world.yaml robot.shape.radius",
+    "sim_to_real_linear_scale": 5.0,
+    "real_nest_width_m": 0.25,
+    "real_nest_height_m": 0.25,
+    "real_nest_source": "user specification (this task)",
+    "sim_scaled_nest_width_m": 1.25,
+    "sim_scaled_nest_height_m": 1.25,
+    "known_conflict": "The correctly-scaled 1.25 x 1.25 m sim Nest rectangle is SMALLER than the currently configured Scout start layout in config/robot_world.yaml requires (3 of 4 configured Scout starts fall outside it). Not resolved in this task -- see tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md and docs/NEST_BEACON_HARDWARE_PROFILE.md."
+  },
+  "calibration_status": "PENDING_PHYSICAL_MEASUREMENT",
+  "sources": [
+    {
+      "parameter_name": "wifi_band_low_hz",
+      "value": 2412000000,
+      "unit": "Hz",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1, Table 19 (Wi-Fi RF Characteristics)",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET"
+    },
+    {
+      "parameter_name": "wifi_band_high_hz",
+      "value": 2484000000,
+      "unit": "Hz",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1, Table 19 (Wi-Fi RF Characteristics)",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET"
+    },
+    {
+      "parameter_name": "wifi_protocols",
+      "value": "802.11b/g/n",
+      "unit": "protocol",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET"
+    },
+    {
+      "parameter_name": "tx_power_datasheet_max_dbm",
+      "value": 19.5,
+      "unit": "dBm",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1, Table 20 (TX Power) -- 802.11b, 1/11 Mbps",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET",
+      "cross_check": "Classic ESP32-WROOM-32 datasheet (NRND, v3.7) publishes the same 19.5 dBm maximum."
+    },
+    {
+      "parameter_name": "tx_power_datasheet_min_dbm",
+      "value": -12.0,
+      "unit": "dBm",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1, Table 20 (TX Power) -- 802.11n, HT40, MCS7",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET",
+      "cross_check": "Classic ESP32-WROOM-32 datasheet (NRND, v3.7) instead publishes 13.0 dBm as its minimum (802.11n HT20/HT40 MCS7) -- the two published tables disagree at the low end; recorded here as found, not reconciled, since the exact purchased module variant is unverified (PROVISIONAL_UNTIL_BOARD_MARKING_VERIFIED)."
+    },
+    {
+      "parameter_name": "rx_sensitivity_dbm_reference",
+      "value": -97.0,
+      "unit": "dBm",
+      "source_document": "ESP32-WROOM-32E & ESP32-WROOM-32UE Datasheet",
+      "document_version": "v2.1",
+      "source_section": "Section 7.1, Table 21 (RX Sensitivity) -- 802.11b, 1 Mbps",
+      "source_url": "https://www.espressif.com/sites/default/files/documentation/esp32-wroom-32e_esp32-wroom-32ue_datasheet_en.pdf",
+      "classification": "DATASHEET",
+      "cross_check": "Classic ESP32-WROOM-32 datasheet (NRND, v3.7) publishes the same -97.0 dBm at 802.11b 1 Mbps."
+    },
+    {
+      "parameter_name": "tx_power_esp_idf_unit_dbm",
+      "value": 0.25,
+      "unit": "dBm per esp_wifi_set_max_tx_power() unit",
+      "source_document": "ESP-IDF Programming Guide -- Wi-Fi API Reference (esp_wifi_set_max_tx_power)",
+      "document_version": "latest (docs.espressif.com/projects/esp-idf)",
+      "source_section": "esp_wifi.h / Wi-Fi API reference, esp_wifi_set_max_tx_power()",
+      "source_url": "https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_wifi.html",
+      "classification": "ESP_IDF"
+    },
+    {
+      "parameter_name": "tx_power_esp_idf_units",
+      "value": 8,
+      "unit": "raw esp_wifi_set_max_tx_power() units",
+      "source_document": "ESP-IDF Programming Guide -- Wi-Fi API Reference (esp_wifi_set_max_tx_power)",
+      "document_version": "latest (docs.espressif.com/projects/esp-idf)",
+      "source_section": "esp_wifi_set_max_tx_power() quantization table: {8:2dBm, 20:5dBm, 28:7dBm, 34:8dBm, 44:11dBm, 52:13dBm, 56:14dBm, 60:15dBm, 66:16dBm, 72:18dBm, 80:20dBm}",
+      "source_url": "https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_wifi.html",
+      "classification": "ESP_IDF"
+    },
+    {
+      "parameter_name": "tx_power_dbm_reference",
+      "value": 2.0,
+      "unit": "dBm",
+      "source_document": "ESP-IDF Programming Guide -- Wi-Fi API Reference (esp_wifi_set_max_tx_power), selecting raw unit 8",
+      "document_version": "latest (docs.espressif.com/projects/esp-idf)",
+      "source_section": "esp_wifi_set_max_tx_power() quantization table",
+      "source_url": "https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_wifi.html",
+      "classification": "ESP_IDF",
+      "selection_rationale": "Lowest officially documented, reproducible ESP-IDF TX-power step; intentionally weak so RSSI-based Home confirmation over the small Nest corresponds to genuinely close range. Configurable in both simulation and real firmware via the same esp_wifi_set_max_tx_power(8) call."
+    },
+    {
+      "parameter_name": "wifi_channel",
+      "value": 6,
+      "unit": "802.11 2.4 GHz channel number",
+      "source_document": "IEEE 802.11 standard 2.4 GHz channel plan (general standard, not Espressif-specific)",
+      "document_version": "n/a",
+      "source_section": "n/a",
+      "source_url": "",
+      "classification": "DEVELOPMENT_ASSUMPTION",
+      "selection_rationale": "Common, non-edge, ESP32-supported 2.4 GHz channel (2437 MHz); explicitly configurable via BEACON_WIFI_CHANNEL, not hardcoded independently of channel."
+    },
+    {
+      "parameter_name": "tx_antenna_gain_dbi",
+      "value": 0.0,
+      "unit": "dBi",
+      "source_document": "none -- neutral development assumption",
+      "document_version": "n/a",
+      "source_section": "n/a",
+      "source_url": "",
+      "classification": "DEVELOPMENT_ASSUMPTION",
+      "selection_rationale": "The datasheet does not publish a value directly usable as a scalar antenna gain in the link-budget equation; a neutral 0 dBi is used rather than an invented measured figure, pending calibration."
+    },
+    {
+      "parameter_name": "rx_antenna_gain_dbi",
+      "value": 0.0,
+      "unit": "dBi",
+      "source_document": "none -- neutral development assumption",
+      "document_version": "n/a",
+      "source_section": "n/a",
+      "source_url": "",
+      "classification": "DEVELOPMENT_ASSUMPTION"
+    },
+    {
+      "parameter_name": "system_loss_db",
+      "value": 0.0,
+      "unit": "dB",
+      "source_document": "none -- neutral development assumption",
+      "document_version": "n/a",
+      "source_section": "n/a",
+      "source_url": "",
+      "classification": "DEVELOPMENT_ASSUMPTION"
+    },
+    {
+      "parameter_name": "home_signal_threshold",
+      "value": null,
+      "unit": "dBm",
+      "source_document": "computed from home_region_radius_m via the development propagation model, NOT a datasheet value",
+      "document_version": "n/a",
+      "source_section": "n/a",
+      "source_url": "",
+      "classification": "PHYSICAL_MEASUREMENT_PENDING",
+      "notes": "Provisional; will be replaced/validated using the actual NodeMCU ESP32 Nest Beacon per the calibration plan in docs/NEST_BEACON_HARDWARE_PROFILE.md. Configurable, not a hardware truth."
+    }
+  ]
+}

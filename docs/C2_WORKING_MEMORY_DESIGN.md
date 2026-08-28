@@ -2,12 +2,69 @@
 
 **Status note (2026-08-27): this document now describes the CANDIDATE
 CORRECTED C2 design** (the F3/F4 Return correction — see
-`tests/C2_RETURN_CORRECTION_REPORT.md`, `tests/C2_FAILED_RETURN_ROOT_CAUSE_ANALYSIS.md`).
+`tests/C2_RETURN_CORRECTION_REPORT.md`, `tests/C2_FAILED_RETURN_ROOT_CAUSE_ANALYSIS.md`
+— the Boot/Home Confirmation correction — see
+`tests/C2_BOOT_HOME_CONFIRMATION_REPORT.md`,
+`docs/COMMON_NEST_INITIALIZATION_DESIGN.md` — the canonical Home/Nest
+arrival correction — see `tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md` —
+the sim-to-real NodeMCU ESP32 RF hardware alignment — see
+`docs/NEST_BEACON_HARDWARE_PROFILE.md`,
+`docs/ESP32_WROOM32_RSSI_SIM_TO_REAL_MODEL.md` — **and** the sim-to-real
+software-architecture correction — see
+`docs/SIM_TO_REAL_SOFTWARE_ARCHITECTURE.md`,
+`tests/SIM_TO_REAL_PORTABILITY_REPORT.md`. RSSI is a dBm value via
+`ESP32NestBeaconModel`/`SimulatedNestRSSIModel`, with no geometric
+sim-to-real scale coupling; WM (this file's subject) was audited and
+confirmed already fully backend-independent -- no change was needed here.
+Home confirmation is now `home_observation.HomeConfirmationPolicy`, a
+portable core the simulation adapter feeds via `HomeObservation`).
 It has not been frozen or research-approved; `C2_RETURN_CORRECTION_REPORT.md`
 concludes `FURTHER DIAGNOSIS REQUIRED`, not ready-for-freeze. The lifecycle
 and final-approach/route-reacquisition sections below reflect the corrected
 behavior currently in `src/swarm_simulate/swarm_baseline.py` and
 `src/swarm_simulate/c2_working_memory.py`.
+
+**Canonical wording (superseding any earlier wording in this document):**
+- Each Scout maintains its own cycle-local Home Origin, always its own
+  `(0,0)` local frame at that Scout's own current position when a cycle
+  starts. Origins are **not** shared between Scouts and **not** forced to
+  equal the Nest centroid or any global coordinate.
+- Working Memory guides Return navigation; local ToF obstacle safety may
+  temporarily override it, exactly as before.
+- RSSI is HOME CONFIRMATION ONLY — both at Boot and at Return arrival. It
+  is never a bearing, distance, steering, or navigation input in either C1
+  or C2.
+- Nest arrival requires physical membership in the configured Home/Nest
+  region **plus** RSSI confirmation — the single canonical
+  `_environment_home_confirmed` predicate, used identically for Boot and
+  Return (Test HOME-14).
+- Returning exactly to the previous local origin (or to any other specific
+  point) is **not** required (Test HOME-9) — entering the shared Home/Nest
+  region with a passing RSSI reading anywhere inside it is sufficient.
+
+## Boot/Home Confirmation (common infrastructure, precedes WM entirely)
+
+Before any EXPLORE motion or WM initialization, every Scout (C1 and C2
+alike) goes through a fixed Boot/Home Confirmation sequence owned by the
+environment, not by any Scout: `SCOUT_BOOT` → `HOME_RSSI_SAMPLE` →
+`HOME_PHYSICAL_REGION_CHECK` → `HOME_CONFIRMED`. WM size is provably 0
+before `HOME_CONFIRMED` (WM's `start_cycle()` is only called after, and only
+for C2). A Scout that is not physically inside the derived Home region, or
+whose RSSI does not meet the Home confirmation threshold, causes a fail-fast
+`RuntimeError("INVALID_INITIAL_HOME_STATE: ...")` rather than a silent
+false origin. Full derivation of the Home region, Nest center, and RSSI
+threshold is in `docs/COMMON_NEST_INITIALIZATION_DESIGN.md`. The Nest is
+environment-owned (the centroid of the configured Scout start layout),
+identical for C1 and C2 (Test HOME-5) — this is the shared Nest BEACON/
+REGION center, distinct from each Scout's own local Home ORIGIN (above).
+
+Return arrival (`NEST_REACHED`) now uses this exact same
+`_environment_home_confirmed` predicate — not the old, separate, much
+tighter `nest_delivery_radius_m` (0.12 m) "delivery point" rule. That
+constant was audited (`tests/C2_CANONICAL_HOME_ARRIVAL_REPORT.md`) and
+found to represent only a historical arrival-point approximation, not a
+real physical docking mechanism; there is no requirement that a Scout
+return to one tiny docking point.
 
 ## Boundary
 
@@ -26,6 +83,9 @@ the oldest non-origin entry is pruned, retaining the current-cycle origin.
 
 ## Lifecycle
 
+0. **Boot/Home Confirmation** (see section above): `SCOUT_BOOT` →
+   `HOME_RSSI_SAMPLE` → `HOME_PHYSICAL_REGION_CHECK` → `HOME_CONFIRMED`.
+   Only after this does Cycle-1 begin.
 1. `EXPLORE`: start with a local origin and record executed own-motion.
 2. `HARVEST_COMPLETE`: the Scout enters `RETURN_HOME` (never Explore).
 3. `RETURN_HOME`: consume newest breadcrumbs first. The local controller turns
@@ -80,12 +140,19 @@ route reacquisition eliminates the frozen-position deadlock, but in 7 of 9
 corrected-run failures the Scout now repeatedly reacquires new targets
 without ever converging back near its own recorded cycle origin — a
 different, not-yet-diagnosed pattern. Separately, for a Scout's first
-cycle, the local origin is that Scout's own mission-start position, which
-is exactly the Nest only for Scout0 (Scout1 starts 0.699 m away, Scout2
-1.499 m away, per the fixed start layout) — a pre-existing geometric fact
-that was invisible before this correction because the F4 defect always
-intervened first. Neither of these is a recurrence of F3 or F4, and per
-the correction task's Stop Rule, neither has been patched.
+cycle, the local origin is still that Scout's own boot/mission-start
+position, not a value validated against the Nest — Boot/Home Confirmation
+(see section above) verifies a Scout is physically *near* the Nest at boot,
+but does not reposition WM's local origin onto the Nest center itself, so
+this gap remains open. Under the corrected, environment-owned Nest center
+(centroid of configured starts — `docs/COMMON_NEST_INITIALIZATION_DESIGN.md`),
+the exact per-Scout distances from this original diagnosis are superseded:
+for the 3-Scout layout, Scout1 now starts exactly at the Nest center
+(0 m), while Scout0 and Scout2 each start 0.80 m away. The qualitative
+finding — Cycle-1 local origin ≠ Nest for most Scouts — still holds; only
+the specific numbers changed. Neither this nor the reacquisition-pattern
+finding is a recurrence of F3 or F4, and per the correction task's Stop
+Rule, neither has been patched.
 
 ## Development logs
 
